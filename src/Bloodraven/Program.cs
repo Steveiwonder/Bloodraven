@@ -39,7 +39,7 @@ sealed class BotWorker(
 {
     readonly Channel<BotMessage> queue = Channel.CreateBounded<BotMessage>(new BoundedChannelOptions(20)
     {
-        FullMode = BoundedChannelFullMode.Reject
+        FullMode = BoundedChannelFullMode.Wait
     });
     long offset;
 
