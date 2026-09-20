@@ -1,0 +1,7 @@
+bin/
+obj/
+.publish/
+state/
+*.env
+appsettings.*.json
+!appsettings.json
