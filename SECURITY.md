@@ -17,3 +17,13 @@ The systemd service runs as your selected Linux user, with that user's Codex aut
 The persistent queue/reply journal contains message content and must be protected like conversation history. Systemd uses `UMask=0077`; the installer creates state with mode `0700`, configuration with `0600`, and new state files are owner-only. Never post raw state files, old logs, or credentials in issues. Interrupted tasks are not automatically replayed, but may already have produced side effects.
 
 Please report vulnerabilities privately through GitHub Security Advisories rather than a public issue.
+
+## Approval mode and files
+
+Native approval mode uses Codex app-server with a read-only sandbox and `unlessTrusted` policy. The bridge responds to command/file requests only after the configured owner approves the complete displayed operation. Unknown requests, oversized proposals and additional permission grants fail closed. Approval buttons are bound to a random, single-use, in-memory request and the private chat, and expire with the task or after five minutes. They cannot authorise a later run after restart.
+
+Codex decides which operations need approval. Existing Codex execution rules and external MCP tools must be reviewed separately; an MCP server can have privileges outside the local command sandbox. Approval mode is not a guarantee that every externally visible effect will produce a button. Do not configure untrusted external tools and assume the shell sandbox confines them.
+
+Incoming files are accepted only from the authorised sender, capped at 10 MiB and stored under generated private paths. Their contents remain untrusted input. Explicit `/file` exports are restricted to repository paths with no traversal, `.git` or symlinks, and are snapshotted before delivery. This does not protect repository files from a hostile process running as the same Linux user. The authorised owner can intentionally export sensitive files in their repository; check the requested path before sending it.
+
+Schedules execute real tasks with the current approval mode and the configured service permissions. Use inspection-only prompts unless you intend unattended changes, and pause a schedule before changing its purpose. Back up state before downgrading: older binaries must not process journals containing features they do not understand.
