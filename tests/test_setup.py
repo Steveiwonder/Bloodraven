@@ -35,10 +35,29 @@ class PairingTests(unittest.TestCase):
             self.assertTrue(path.read_text().startswith(original))
             self.assertIn('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"', path.read_text())
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='0'):
+            before = path.read_bytes()
+            with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=AssertionError('Must not prompt twice')):
                 setup.progress_config(path)
-            self.assertEqual(path.read_text().count('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS='), 1)
-            self.assertIn('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="0"', path.read_text())
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_interactive_upgrade_keeps_saved_interval_including_disabled(self):
+        for value in ('0', '15', '3600'):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'settings.env'
+                path.write_text(f'BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="{value}"\n')
+                before = path.read_bytes()
+                with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=AssertionError('Saved setting must not prompt')):
+                    setup.progress_config(path)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_noninteractive_missing_interval_does_not_prompt_or_modify_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings.env'
+            path.write_text('# Existing settings\n')
+            before = path.read_bytes()
+            with patch.object(setup.sys.stdin, 'isatty', return_value=False), patch('builtins.input', side_effect=AssertionError):
+                setup.progress_config(path)
+            self.assertEqual(path.read_bytes(), before)
 
     def test_noninteractive_upgrade_keeps_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
