@@ -43,6 +43,6 @@ jobs:
           from pathlib import Path
           sys.path.insert(0, 'scripts')
           from apparmor import profile_text
-          Path('/tmp/bloodraven-profile-test').write_text(profile_text(Path('/opt/codex test/bin/codex')))
+          Path('/tmp/bloodraven-profile-test').write_text(profile_text(Path('/opt/codex test/node_modules/@openai/codex/bin/codex')))
           PYCODE
           sudo apparmor_parser -Q -T /tmp/bloodraven-profile-test
