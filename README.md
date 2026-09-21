@@ -17,37 +17,32 @@ Bloodraven is a small, self-hosted Telegram interface for the OpenAI Codex CLI. 
 
 Bloodraven stores no personal configuration in Git. Its installer writes secrets to `/etc/bloodraven/bloodraven.env` with mode `0600` and conversation state to `/var/lib/bloodraven`.
 
-## Install on Ubuntu
+## One-command Ubuntu installation
 
-These instructions assume Ubuntu 22.04 or newer. Run commands as your normal user, not as `root`.
-
-### 1. Install the basic tools
+First change into the Git repository that Codex should use, then run the installer as your normal Ubuntu user—not as `root`:
 
 ```bash
-sudo apt update
-sudo apt install -y curl git python3
+cd ~/path/to/your-agent-repository
+curl -fsSL https://raw.githubusercontent.com/Steveiwonder/Bloodraven/master/install.sh -o /tmp/bloodraven-install.sh && bash /tmp/bloodraven-install.sh
 ```
 
-Install the [.NET 8 SDK for your Ubuntu version](https://learn.microsoft.com/dotnet/core/install/linux-ubuntu), then confirm it works:
+Bloodraven remembers the directory in which you launch this command and offers it as the default working directory. You can enter a different path during setup. Every new and resumed Codex session will start in the selected directory, so its Git history, `AGENTS.md`, skills, scripts, and other repository instructions are available to Codex.
 
-```bash
-dotnet --version
-```
+The interactive setup will:
 
-The result should start with `8.` or a later compatible version.
+1. install the required Ubuntu packages;
+2. install the .NET 8 SDK if needed;
+3. install the Codex CLI using OpenAI's official installer if needed;
+4. pause for Codex sign-in if this machine is not already authenticated;
+5. download the latest Bloodraven source;
+6. identify your Telegram user and private-chat IDs;
+7. offer the directory where you launched the installer as Codex's working repository, while allowing you to override it;
+8. build Bloodraven and install it as an automatically starting systemd service;
+9. store secrets outside the repository with root-only file permissions.
 
-### 2. Install and sign in to Codex
+Before running it, create a Telegram bot so you have its token ready.
 
-Install the [Codex CLI](https://learn.chatgpt.com/docs/codex-cli), then sign in:
-
-```bash
-codex login
-codex login status
-```
-
-Bloodraven runs as this same Linux user, so it can reuse the Codex login you just created.
-
-### 3. Create your Telegram bot
+### Create your Telegram bot
 
 1. Open Telegram and start a chat with [@BotFather](https://t.me/BotFather). Check that the username is exactly `@BotFather` and that it has Telegram's verification tick.
 2. Send `/newbot`.
@@ -57,43 +52,17 @@ Bloodraven runs as this same Linux user, so it can reuse the Codex login you jus
 
 You do not need a webhook, public IP address, domain name, or open firewall port. Bloodraven connects out to Telegram using long polling.
 
-### 4. Choose Codex's working repository
-
-Bloodraven asks Codex to work inside a Git repository. This can be an existing repository containing your instructions and scripts, or a new one:
-
-```bash
-mkdir -p ~/codex-workspace
-cd ~/codex-workspace
-git init
-```
-
-Make a note of its full path:
-
-```bash
-pwd
-```
-
-### 5. Download and run Bloodraven
-
-```bash
-cd ~
-git clone https://github.com/Steveiwonder/Bloodraven.git
-cd Bloodraven
-chmod +x scripts/install.sh
-./scripts/install.sh
-```
-
-The installer will guide you through the rest:
+### Follow the prompts
 
 1. Paste the private Telegram bot token from BotFather.
 2. When prompted, open the new bot in Telegram and press **Start** or send `/start`.
 3. Return to the terminal and press Enter. Bloodraven will discover your numeric Telegram user and chat IDs automatically.
-4. Enter the full path of the working repository from the previous step.
+4. Confirm the displayed working repository by pressing Enter, or type a different path. If the selected directory is not already a Git repository, setup asks before initialising one.
 5. Choose a Codex sandbox. Press Enter to accept the safer `workspace-write` default.
 
 The installer builds Bloodraven, stores its private settings outside the Git repository, installs a systemd service, and starts it automatically.
 
-### 6. Test it
+### Test it
 
 Open your bot in Telegram and send:
 
@@ -116,6 +85,16 @@ sudo journalctl -u bloodraven -n 100 --no-pager
 ### Permissions
 
 The default `workspace-write` sandbox lets Codex edit the selected working repository. Choose `read-only` if it should only inspect files. Choose `danger-full-access` only if Codex must administer systems outside the repository and you understand that your Telegram account then becomes a powerful remote-control interface to that machine.
+
+### Inspect before running
+
+If you prefer to inspect the installer before executing it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Steveiwonder/Bloodraven/master/install.sh -o bloodraven-install.sh
+less bloodraven-install.sh
+bash bloodraven-install.sh
+```
 
 ## Telegram commands
 
