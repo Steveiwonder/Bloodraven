@@ -41,11 +41,12 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git 
 
 export PATH="${HOME}/.local/bin:${HOME}/.codex/bin:${HOME}/.dotnet:${PATH}"
 
-if ! command -v dotnet >/dev/null 2>&1 || [[ "$(dotnet --version 2>/dev/null || true)" != 8.* ]]; then
-  say "Installing .NET 8 SDK"
+if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-sdks 2>/dev/null | grep -q '^10\.'; then
+  say "Installing .NET 10 SDK"
   dotnet_installer="$(mktemp)"
   curl -fsSL https://dot.net/v1/dotnet-install.sh -o "${dotnet_installer}"
-  bash "${dotnet_installer}" --channel 8.0 --install-dir "${HOME}/.dotnet"
+  bash "${dotnet_installer}" --channel 10.0 --install-dir "${HOME}/.dotnet"
+  hash -r
 fi
 
 if ! command -v codex >/dev/null 2>&1; then
