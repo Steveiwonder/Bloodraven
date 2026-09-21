@@ -54,6 +54,15 @@ class AppArmorTests(unittest.TestCase):
         binary = self.native(launcher.parent.parent / 'node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex')
         self.assertEqual(aa.native_codex(launcher, 'x86_64'), binary)
 
+    def test_scoped_npm_path_installs_profile(self):
+        launcher = self.launcher()
+        binary = self.native(launcher.parent.parent / 'node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex')
+        self.config.write_text(f'BLOODRAVEN_CODEX_EXECUTABLE="{launcher}"\n')
+        with patch.object(aa.platform, 'machine', return_value='x86_64'):
+            self.assertTrue(self.configure())
+        self.assertIn(f'"{binary}"', self.profile.read_text())
+        self.assertEqual(len(self.calls), 2)
+
     def test_hoisted_arm_npm(self):
         launcher = self.launcher()
         binary = self.native(launcher.parent.parent.parent / 'codex-linux-arm64/vendor/aarch64-unknown-linux-musl/codex/codex')
