@@ -2,6 +2,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,6 +49,38 @@ class PairingTests(unittest.TestCase):
         self.assertIn("ExecStartPre=", text)
         self.assertIn("PATH=/home/user/node/bin:/usr/bin", text)
         self.assertEqual(deploy.unit_quote("a%$b"), '"a%%$$b"')
+        self.assertIn('WorkingDirectory=/opt/release a\n', text)
+        self.assertIn('EnvironmentFile=/etc/bloodraven/bloodraven.env\n', text)
+
+    def test_generated_unit_passes_real_systemd_validator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            unit = Path(tmp) / "bloodraven.service"
+            text = deploy.service_text("root", "root", "/root", "/usr/bin/true",
+                                       Path('/opt/release a%/Bloodraven.dll'), '/usr/bin:/bin',
+                                       Path('/etc/bloodraven/bloodraven.env'), Path('/var/lib/bloodraven'))
+            unit.write_text(text)
+            deploy.Systemd().verify(unit)
+            # Demonstrate that this test detects the original quoting regression.
+            unit.write_text(text.replace('WorkingDirectory=/opt/release a%%',
+                                         'WorkingDirectory="/opt/release a%%"'))
+            result = subprocess.run(['systemd-analyze', 'verify', str(unit)], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_invalid_paths_rejected(self):
+        for path in ('relative', '/tmp/new\nUser=root', '/tmp/\0file'):
+            with self.assertRaises(ValueError):
+                deploy.unit_path(path)
+
+    def test_failed_stop_only_tolerated_for_inactive_or_missing_unit(self):
+        for status in (0, 1, 3, 4):
+            with self.subTest(status=status), patch.object(deploy.subprocess, 'run') as run:
+                run.side_effect = [subprocess.CalledProcessError(1, 'systemctl'),
+                                   subprocess.CompletedProcess([], status)]
+                if status in (3, 4):
+                    deploy.Systemd().run('stop', 'bloodraven')
+                else:
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        deploy.Systemd().run('stop', 'bloodraven')
 
 
 class FakeSystemd:
@@ -55,8 +89,16 @@ class FakeSystemd:
         self.fail = fail
         self.failed = False
 
+    def verify(self, unit):
+        self.calls.append(("verify",))
+        if self.fail == "verify":
+            raise RuntimeError("Invalid candidate")
+
     def run(self, *args):
         self.calls.append(args)
+        if self.fail == "rollback-stop" and (args[0] == "start" or
+                (args[0] == "stop" and self.calls.count(args) == 2)):
+            raise RuntimeError("Injected start/rollback stop failure")
         if self.fail == args[0] and not self.failed:
             self.failed = True
             raise RuntimeError("Injected activation failure")
@@ -86,7 +128,12 @@ class DeploymentTests(unittest.TestCase):
                     deploy.deploy(publish, root, unit, state, render, systemd)
                 if existing:
                     self.assertEqual(unit.read_text(), "old service")
-                    self.assertEqual(systemd.calls[-1], ("start", "bloodraven"))
+                    if failure == "verify":
+                        self.assertEqual(systemd.calls, [("verify",)])
+                    elif failure == "rollback-stop":
+                        self.assertEqual(systemd.calls[-1], ("daemon-reload",))
+                    else:
+                        self.assertEqual(systemd.calls[-1], ("start", "bloodraven"))
                 else:
                     self.assertFalse(unit.exists())
             else:
@@ -102,6 +149,8 @@ class DeploymentTests(unittest.TestCase):
     def test_failed_health_restores_service(self): self.exercise("health")
     def test_failed_enable_restores_service(self): self.exercise("enable")
     def test_failed_first_install_removes_only_new_unit(self): self.exercise("health", existing=False)
+    def test_invalid_candidate_does_not_stop_previous_service(self): self.exercise("verify")
+    def test_failed_rollback_stop_still_restores_previous_unit(self): self.exercise("rollback-stop")
 
 
 if __name__ == "__main__":

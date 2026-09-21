@@ -29,8 +29,8 @@ User={user}
 Group={group}
 Environment={environment('HOME=' + home)}
 Environment={environment('PATH=' + path)}
-EnvironmentFile={environment(str(config))}
-WorkingDirectory={environment(str(executable.parent))}
+EnvironmentFile={unit_path(config)}
+WorkingDirectory={unit_path(executable.parent)}
 ExecStartPre={unit_quote(dotnet)} {unit_quote(str(executable))} --check
 ExecStart={unit_quote(dotnet)} {unit_quote(str(executable))}
 Restart=on-failure
@@ -47,9 +47,30 @@ WantedBy=multi-user.target
 """
 
 
+def unit_path(value):
+    # These directives consume a path, not a quoted command-line argument.
+    value = str(value)
+    if not value.startswith("/") or any(c in value for c in "\n\r\0"):
+        raise ValueError("Expected an absolute systemd path without control characters")
+    return value.replace("%", "%%")
+
+
 class Systemd:
+    def verify(self, unit):
+        subprocess.run(["systemd-analyze", "verify", str(unit)], check=True)
+
     def run(self, *args):
-        subprocess.run(["systemctl", *args], check=True, stdout=subprocess.DEVNULL)
+        try:
+            subprocess.run(["systemctl", *args], check=True, stdout=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            # A previous broken upgrade may have left an invalid/unloaded unit.
+            # Only tolerate failed stops when systemd confirms it is not active.
+            if args == ("stop", "bloodraven"):
+                status = subprocess.run(["systemctl", "is-active", "--quiet", "bloodraven"],
+                                        check=False).returncode
+                if status in (3, 4):
+                    return
+            raise
 
     def healthy(self, ready):
         # Type=exec + ExecStartPre verifies auth/repository under the real service user.
@@ -84,6 +105,8 @@ def deploy(publish, root, unit, state, render, systemd):
         backup.write_bytes(previous)
     candidate = release / "bloodraven.service"
     candidate.write_text(render(release / "Bloodraven.dll"))
+    # Reject invalid candidates before disrupting the current service.
+    systemd.verify(candidate)
     ready = state / "ready"
     activation_started = False
     try:
@@ -100,7 +123,11 @@ def deploy(publish, root, unit, state, render, systemd):
         systemd.run("enable", "bloodraven")
     except BaseException:
         if activation_started:
-            systemd.run("stop", "bloodraven")
+            stop_error = None
+            try:
+                systemd.run("stop", "bloodraven")
+            except Exception as error:
+                stop_error = error
             if previous is not None:
                 temporary = unit.with_suffix(".service.pending")
                 temporary.write_bytes(previous)
@@ -108,6 +135,8 @@ def deploy(publish, root, unit, state, render, systemd):
             else:
                 unit.unlink(missing_ok=True)
             systemd.run("daemon-reload")
+            if stop_error is not None:
+                raise RuntimeError("Previous unit restored, but stopping the service failed; manual recovery is required") from stop_error
             if previous is not None:
                 systemd.run("start", "bloodraven")
         raise
