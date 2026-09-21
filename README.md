@@ -114,7 +114,7 @@ bash bloodraven-install.sh
 | `/conversations` | List conversations with switch buttons |
 | `/new` | Reset the selected conversation when this command reaches the queue |
 | `/status` | Show the active conversation, session, running task and queue depth |
-| `/health` | Show Bloodraven version, repository, startup Codex check, polling, schedules and recent failures |
+| `/health` | Show Bloodraven version, repository, live Codex/login check, polling, schedules and recent failures |
 | `/queue` | Show tasks with **Move to next** and **Remove** buttons |
 | `/front ID` / `/remove ID` | Move a pending task to next, or remove it |
 | `/clear` | Remove pending tasks; keep the running task and schedules |
@@ -223,7 +223,7 @@ Only private chats are accepted. If the optional chat ID is set, it must be a va
 
 ## Scope
 
-Bloodraven 0.2 supports Ubuntu, one authorised bot owner, named conversations sharing one task queue, photos/documents, recurring schedules and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` reports startup Codex/login checks and recent task outcomes; it does not claim every external service is healthy.
+Bloodraven 0.2 supports Ubuntu, one authorised bot owner, named conversations sharing one task queue, photos/documents, recurring schedules and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
 
 ## Development
 
