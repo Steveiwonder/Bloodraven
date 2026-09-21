@@ -544,6 +544,18 @@ static async Task Approvals()
     Assert((await journal.SnapshotAsync(default)).Replies.All(r => r.Buttons is null));
     using var oversized = JsonDocument.Parse(JsonSerializer.Serialize(new { command = new string('x', 3000) }));
     Assert(!await broker.RequestAsync(123, "default", "command", oversized.RootElement, stop.Token));
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "reject-thread");
+    try
+    {
+        await runner.RunAsync("test protocol error", stop.Token, conversation: "reject",
+            approve: (_, _, _) => throw new Exception("Rejected setup must never reach an approval callback"));
+        throw new Exception("Expected a stage-specific protocol error");
+    }
+    catch (AppServerException ex)
+    {
+        Assert(ex.Stage == "thread/start" && ex.RpcCode == -32602);
+        Assert(!ex.ToString().Contains("private upstream diagnostic"));
+    }
 }
 
 static async Task Attachments()

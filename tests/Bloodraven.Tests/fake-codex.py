@@ -13,6 +13,9 @@ if "app-server" in sys.argv:
         print(json.dumps(value), flush=True)
     for line in sys.stdin:
         message = json.loads(line)
+        if os.environ.get("TEST_CODEX_REQUEST_TRACE"):
+            with open(os.environ["TEST_CODEX_REQUEST_TRACE"], "a") as trace:
+                trace.write(json.dumps(message) + "\n")
         method = message.get("method")
         params = message.get("params", {})
         if method == "initialized":
@@ -20,11 +23,16 @@ if "app-server" in sys.argv:
         if method == "initialize":
             send({"id": message["id"], "result": {}})
         elif method in ("thread/start", "thread/resume"):
-            assert params["sandbox"] == "readOnly" and params["approvalPolicy"] == "unlessTrusted"
+            if mode == "reject-thread":
+                send({"id": message["id"], "error": {"code": -32602, "message": "private upstream diagnostic"}})
+                continue
+            assert params["sandbox"] == "read-only" and params["approvalPolicy"] == "untrusted"
             send({"id": message["id"], "result": {"thread": {"id": "thr_test"}}})
         elif method == "turn/start":
             assert params["sandboxPolicy"]["type"] == "readOnly"
-            assert params["approvalPolicy"] == "unlessTrusted"
+            assert params["sandboxPolicy"]["networkAccess"] is False
+            assert params["input"][0]["text_elements"] == []
+            assert params["approvalPolicy"] == "untrusted"
             send({"id": message["id"], "result": {"turn": {"id": "turn_test"}}})
             if mode == "unsupported":
                 send({"id": "approval", "method": "unknown/request", "params": {}})
