@@ -23,7 +23,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
 
     public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null,
         string conversation = "default", IReadOnlyList<string>? images = null,
-        Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null)
+        Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null, ModelSettings? settings = null)
     {
         using var run = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         run.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
@@ -35,7 +35,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         try
         {
             if (approve is not null)
-                return await AppServerRunner.RunAsync(options, sessions, conversation, prompt, images ?? [], progress, approve, run.Token);
+                return await AppServerRunner.RunAsync(options, sessions, conversation, prompt, images ?? [], progress, approve, run.Token, settings);
             var sessionId = await sessions.GetAsync(run.Token, conversation);
             var start = new ProcessStartInfo(options.CodexExecutable)
             {
@@ -43,6 +43,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
             };
             options.RemoveBridgeSecrets(start);
+            (settings ?? new()).AddArguments(start);
             foreach (var arg in new[] { "-C", options.WorkingDirectory, "exec", "--json", "--sandbox", options.Sandbox })
                 start.ArgumentList.Add(arg);
             if (sessionId is not null)

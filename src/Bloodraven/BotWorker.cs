@@ -50,7 +50,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         try
         {
             return await codex.RunAsync(prompt, token, progress.Observe, job.Conversation, images,
-                job.ApprovalRequired ? (method, details, ct) => approvals.RequestAsync(job.ChatId, job.Conversation, method, details, ct) : null);
+                job.ApprovalRequired ? (method, details, ct) => approvals.RequestAsync(job.ChatId, job.Conversation, method, details, ct) : null, job.Settings);
         }
         finally
         {
@@ -79,7 +79,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         try { session = await sessions.GetAsync(token, state.ActiveConversation, state.Approvals ?? options.ApprovalDefault); }
         catch (InvalidDataException) { session = "invalid — use /new"; }
         var running = state.Jobs.FirstOrDefault(j => j.Running);
-        var text = $"Bloodraven {Version}\nStatus: {(codex.IsRunning ? "working" : "idle")}\nConversation: {state.ActiveConversation}\nSession: {session ?? "none"}\nRunning: {(running is null ? "none" : $"{running.Id} ({running.Conversation})")}\nWaiting: {state.Jobs.Count(j => !j.Running)}\nPending replies: {state.Replies.Count}\nApproval requests: {approvals.Count}";
+        var text = $"Bloodraven {Version}\nStatus: {(codex.IsRunning ? "working" : "idle")}\nConversation: {state.ActiveConversation}\n{ModelSettings.For(state, state.ActiveConversation).Describe()}\nSession: {session ?? "none"}\nRunning: {(running is null ? "none" : $"{running.Id} ({running.Conversation})")}\nWaiting: {state.Jobs.Count(j => !j.Running)}\nPending replies: {state.Replies.Count}\nApproval requests: {approvals.Count}";
         if (health)
         {
             string availability;
@@ -150,7 +150,8 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     else
                     {
                         d.Jobs.Add(new Job(update.UpdateId, chat, text, Conversation: d.ActiveConversation,
-                            Attachments: files, ApprovalRequired: d.Approvals ?? options.ApprovalDefault));
+                            Attachments: files, ApprovalRequired: d.Approvals ?? options.ApprovalDefault,
+                            Settings: ModelSettings.For(d, d.ActiveConversation)));
                         Journal.AddReply(d, chat, $"Queued · {d.ActiveConversation}.");
                     }
                 }, token);
@@ -258,6 +259,8 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 result = "Task failed. Check Codex login, repository permissions, attachments and saved session locally; /new resets a broken session. Review changes before retrying.";
             }
             finally { lock (taskGate) activeTask = null; }
+            if (outcome == "Failed" && job.Settings is { } selected && (selected.Model is not null || selected.Effort is not null))
+                result += $"\nSubmitted settings:\n{selected.Describe()}\nCheck that your Codex login and model support these choices; /model and /reasoning change settings for new tasks.";
             await journal.ChangeAsync(d =>
             {
                 var current = d.Jobs.FirstOrDefault(j => j.Id == job.Id);

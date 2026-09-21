@@ -5,7 +5,7 @@ namespace Bloodraven;
 public sealed record Attachment(string FileId, string Name, bool Image, long Size = 0);
 public sealed record Job(long Id, long ChatId, string Text, bool Running = false,
     string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null,
-    long? ProgressMessageId = null, bool ApprovalRequired = false);
+    long? ProgressMessageId = null, bool ApprovalRequired = false, ModelSettings? Settings = null);
 public sealed record Reply(string Id, long ChatId, string Text, int Part = 0,
     InlineButton[][]? Buttons = null, long? EditMessageId = null, long? ProgressJobId = null, string? DocumentPath = null, bool Plain = false);
 public sealed record Schedule(string Id, long ChatId, string Prompt, string Conversation,
@@ -21,6 +21,7 @@ public sealed class JournalData
     public List<Schedule> Schedules { get; set; } = [];
     public List<TaskOutcome> Outcomes { get; set; } = [];
     public bool? Approvals { get; set; }
+    public Dictionary<string, ModelSettings> ModelSettings { get; set; } = [];
     public long NextScheduledId { get; set; } = -1;
 }
 
@@ -75,7 +76,7 @@ public sealed class Journal(AppOptions options)
         Offset = value.Offset, Jobs = [.. value.Jobs], Replies = [.. value.Replies],
         ActiveConversation = value.ActiveConversation, Conversations = [.. value.Conversations],
         Schedules = [.. value.Schedules], Outcomes = [.. value.Outcomes], Approvals = value.Approvals,
-        NextScheduledId = value.NextScheduledId
+        NextScheduledId = value.NextScheduledId, ModelSettings = new(value.ModelSettings)
     };
     public static void AddReply(JournalData data, long chatId, string text) =>
         data.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chatId, text));
