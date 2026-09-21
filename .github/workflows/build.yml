@@ -18,4 +18,15 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: dotnet build --configuration Release
       - name: Runtime regression tests (no live credentials)
+        env:
+          TEST_CODEX_REQUEST_TRACE: ${{ runner.temp }}/bloodraven-codex-requests.jsonl
         run: dotnet run --project tests/Bloodraven.Tests --configuration Release
+      - name: Validate approval protocol against real Codex (no model calls)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bloodraven-codex-contract"
+          curl -fsSL --retry 3 https://github.com/openai/codex/releases/download/rust-v0.155.1/codex-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/bloodraven-codex-contract/codex.tar.gz"
+          echo "a0ef8b2debc3bf747e07b1a039354de31300ac0dcc2276498ba281470b5d9115  $RUNNER_TEMP/bloodraven-codex-contract/codex.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/bloodraven-codex-contract/codex.tar.gz" -C "$RUNNER_TEMP/bloodraven-codex-contract"
+          "$RUNNER_TEMP/bloodraven-codex-contract/codex-x86_64-unknown-linux-musl" app-server generate-json-schema --out "$RUNNER_TEMP/bloodraven-codex-contract/schemas"
+          python3 -m pip install jsonschema==4.23.0
+          python3 tests/check_codex_protocol.py "$RUNNER_TEMP/bloodraven-codex-contract/schemas" "$RUNNER_TEMP/bloodraven-codex-requests.jsonl" "$RUNNER_TEMP/bloodraven-codex-contract/codex-x86_64-unknown-linux-musl"
