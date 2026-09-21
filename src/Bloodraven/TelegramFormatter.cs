@@ -64,9 +64,80 @@ public static class TelegramFormatter
             if (trim.StartsWith("```", StringComparison.Ordinal)) { fenced = !fenced; continue; }
             var newline = index + 1 < lines.Length ? "\n" : "";
             if (fenced) { spans.Add(new Span(line + newline, "<pre>", "</pre>")); continue; }
+            var headers = Cells(line);
+            if (headers.Count >= 2 && index + 2 < lines.Length)
+            {
+                var divider = Cells(lines[index + 1]);
+                if (divider.Count == headers.Count && divider.All(c => Regex.IsMatch(c, @"^:?-{3,}:?$")) &&
+                    Cells(lines[index + 2]).Count == headers.Count)
+                {
+                    index += 2;
+                    while (index < lines.Length)
+                    {
+                        var cells = Cells(lines[index]);
+                        if (cells.Count != headers.Count) break;
+                        AddInline(spans, cells[0], bold: true);
+                        for (var column = 1; column < cells.Count; column++)
+                        {
+                            spans.Add(new Span("\n"));
+                            if (cells.Count > 2)
+                            {
+                                AddInline(spans, headers[column] + ":", bold: true);
+                                spans.Add(new Span(" "));
+                            }
+                            AddInline(spans, cells[column]);
+                        }
+                        spans.Add(new Span(index + 1 < lines.Length ? "\n\n" : ""));
+                        index++;
+                    }
+                    index--;
+                    continue;
+                }
+            }
             var heading = Regex.Match(line, @"^#{1,6}\s+(.+)$", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200));
             if (heading.Success) { spans.Add(new Span(heading.Groups[1].Value, "<b>", "</b>")); spans.Add(new Span(newline)); continue; }
             line = Regex.Replace(line, @"^(\s*)[-*+]\s+", "$1• ", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200));
+            AddInline(spans, line);
+            spans.Add(new Span(newline));
+        }
+        if (spans.All(s => string.IsNullOrWhiteSpace(s.Text))) return [new Span(source)];
+        return spans;
+    }
+
+    // Pipes inside code spans and escaped pipes are cell content, not separators.
+    static List<string> Cells(string line)
+    {
+        var cells = new List<string>();
+        var cell = new StringBuilder();
+        var ticks = 0;
+        var separators = 0;
+        var trimmed = line.Trim();
+        for (var i = 0; i < trimmed.Length; i++)
+        {
+            var c = trimmed[i];
+            if (c == '\\' && i + 1 < trimmed.Length && trimmed[i + 1] is '|' or '\\')
+            { cell.Append(trimmed[++i]); continue; }
+            if (c == '`')
+            {
+                var count = 1;
+                while (i + 1 < trimmed.Length && trimmed[i + 1] == '`') { count++; i++; }
+                ticks = ticks == 0 ? count : ticks == count ? 0 : ticks;
+                cell.Append('`', count); continue;
+            }
+            if (c == '|' && ticks == 0)
+            { cells.Add(cell.ToString().Trim()); cell.Clear(); separators++; }
+            else cell.Append(c);
+        }
+        if (separators == 0 || ticks != 0) return [];
+        cells.Add(cell.ToString().Trim());
+        if (trimmed.StartsWith('|')) cells.RemoveAt(0);
+        if (cells.Count > 0 && cells[^1].Length == 0 && trimmed.EndsWith('|')) cells.RemoveAt(cells.Count - 1);
+        return cells;
+    }
+
+    static void AddInline(List<Span> spans, string line, bool bold = false)
+    {
+            var start = spans.Count;
             var cursor = 0;
             foreach (Match match in Inline.Matches(line))
             {
@@ -80,10 +151,11 @@ public static class TelegramFormatter
                 else spans.Add(new Span(match.Groups[group].Value, $"<{tag}>", $"</{tag}>"));
                 cursor = match.Index + match.Length;
             }
-            spans.Add(new Span(line[cursor..] + newline));
-        }
-        if (spans.All(s => string.IsNullOrWhiteSpace(s.Text))) return [new Span(source)];
-        return spans;
+            spans.Add(new Span(line[cursor..]));
+            if (bold)
+                for (var i = start; i < spans.Count; i++)
+                    if (spans[i].Open is not ("<code>" or "<b>"))
+                        spans[i] = spans[i] with { Open = "<b>" + spans[i].Open, Close = spans[i].Close + "</b>" };
     }
     static string Escape(string text) => WebUtility.HtmlEncode(text);
 }
