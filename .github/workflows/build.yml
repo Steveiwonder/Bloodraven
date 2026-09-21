@@ -30,3 +30,19 @@ jobs:
           "$RUNNER_TEMP/bloodraven-codex-contract/codex-x86_64-unknown-linux-musl" app-server generate-json-schema --out "$RUNNER_TEMP/bloodraven-codex-contract/schemas"
           python3 -m pip install jsonschema==4.23.0
           python3 tests/check_codex_protocol.py "$RUNNER_TEMP/bloodraven-codex-contract/schemas" "$RUNNER_TEMP/bloodraven-codex-requests.jsonl" "$RUNNER_TEMP/bloodraven-codex-contract/codex-x86_64-unknown-linux-musl"
+  apparmor-profile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate generated profile with Ubuntu AppArmor parser
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apparmor
+          python3 - <<'PYCODE'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from apparmor import profile_text
+          Path('/tmp/bloodraven-profile-test').write_text(profile_text(Path('/opt/codex test/bin/codex')))
+          PYCODE
+          sudo apparmor_parser -Q -T /tmp/bloodraven-profile-test

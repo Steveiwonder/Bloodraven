@@ -263,6 +263,14 @@ Changes apply to **newly queued tasks**. Running and already queued tasks keep t
 
 Existing installations need only the normal upgrade command—there are no new setup prompts.
 
+## Ubuntu AppArmor compatibility
+
+Installation and upgrades automatically add a Codex-specific user-namespace exception when Ubuntu’s AppArmor user-namespace restriction is enabled. This fixes sandbox startup errors such as `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. The helper detects the native Codex executable behind supported npm launchers or native installations, validates and loads `/etc/apparmor.d/bloodraven-codex`, then deployment restarts Bloodraven. It does not disable AppArmor or change the system-wide namespace restriction, Codex approval policy or sandbox mode.
+
+The exception permits Codex and processes inheriting its AppArmor profile to create user namespaces with the capabilities needed by its own sandbox. It is tied to the resolved executable path and also applies when that executable is launched outside Bloodraven. After changing or updating your Codex installation, run the Bloodraven upgrader to refresh the path. Unsupported/ambiguous launcher layouts or custom conflicting profiles stop setup with an explanation. The previously documented manual profile is adopted automatically. Hosts without the restriction need no profile.
+
+This follows [Ubuntu’s documented per-application user-namespace approach](https://discourse.ubuntu.com/t/ubuntu-24-04-lts-noble-numbat-release-notes/39890).
+
 ## Scope
 
 Bloodraven 0.3 supports Ubuntu, one authorised bot owner, named conversations sharing one task queue, photos/documents, recurring schedules, per-conversation model/reasoning controls and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.

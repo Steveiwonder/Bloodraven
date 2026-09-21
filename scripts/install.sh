@@ -43,5 +43,6 @@ dotnet publish src/Bloodraven/Bloodraven.csproj -c Release -o .publish
 sudo install -d -m 0755 /etc/bloodraven
 sudo install -d -o "${service_user}" -g "${service_group}" -m 0700 /var/lib/bloodraven
 sudo install -m 0600 "${temporary}/bloodraven.env" /etc/bloodraven/bloodraven.env
+sudo python3 scripts/apparmor.py /etc/bloodraven/bloodraven.env
 sudo python3 scripts/deploy.py "${source_root}/.publish" "${service_user}" "${service_group}" "${dotnet_path}" "${PATH}"
 echo "Bloodraven installed. Check it with: sudo systemctl status bloodraven"

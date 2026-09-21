@@ -18,4 +18,5 @@ service_group="$(id -gn "${service_user}")"
 dotnet_path="$(command -v dotnet)"
 dotnet publish src/Bloodraven/Bloodraven.csproj -c Release -o .publish
 sudo python3 scripts/setup.py progress /etc/bloodraven/bloodraven.env
+sudo python3 scripts/apparmor.py /etc/bloodraven/bloodraven.env
 sudo python3 scripts/deploy.py "${source_root}/.publish" "${service_user}" "${service_group}" "${dotnet_path}" "${PATH}"
