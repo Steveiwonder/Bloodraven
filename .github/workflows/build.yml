@@ -1,4 +1,6 @@
 name: Build
+permissions:
+  contents: read
 on:
   push:
   pull_request:
@@ -10,4 +12,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Validate shell scripts
+        run: bash -n install.sh upgrade.sh scripts/install.sh scripts/upgrade.sh
+      - name: Installer and rollback tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: dotnet build --configuration Release
+      - name: Runtime regression tests (no live credentials)
+        run: dotnet run --project tests/Bloodraven.Tests --configuration Release

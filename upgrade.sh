@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 readonly REPOSITORY_URL="https://github.com/Steveiwonder/Bloodraven.git"
 
@@ -27,9 +28,15 @@ source /etc/os-release
 command -v sudo >/dev/null 2>&1 || fail "sudo is required."
 sudo -v
 
+service_user="$(systemctl show bloodraven --property=User --value 2>/dev/null || true)"
+if [[ -z "${service_user}" && ! -f /etc/systemd/system/bloodraven.service ]]; then
+  service_user="$(stat -c %U /var/lib/bloodraven)"
+fi
+[[ "${service_user}" == "$(id -un)" ]] || fail "Run the upgrader as ${service_user:-the original installation user}."
+
 say "Preparing the Bloodraven upgrade"
 sudo apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git python3
 export PATH="${HOME}/.dotnet:${HOME}/.local/bin:${HOME}/.codex/bin:${PATH}"
 
 if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-sdks 2>/dev/null | grep -q '^10\.'; then
