@@ -21,7 +21,9 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         }
     }
 
-    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null)
+    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null,
+        string conversation = "default", IReadOnlyList<string>? images = null,
+        Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null)
     {
         using var run = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         run.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
@@ -32,7 +34,9 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         }
         try
         {
-            var sessionId = await sessions.GetAsync(run.Token);
+            if (approve is not null)
+                return await AppServerRunner.RunAsync(options, sessions, conversation, prompt, images ?? [], progress, approve, run.Token);
+            var sessionId = await sessions.GetAsync(run.Token, conversation);
             var start = new ProcessStartInfo(options.CodexExecutable)
             {
                 WorkingDirectory = options.WorkingDirectory, UseShellExecute = false,
@@ -46,6 +50,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 start.ArgumentList.Add("resume");
                 start.ArgumentList.Add(sessionId);
             }
+            foreach (var path in images ?? []) { start.ArgumentList.Add("--image"); start.ArgumentList.Add(path); }
             start.ArgumentList.Add("-"); // Prompts are stdin data, never CLI options.
             using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Codex.");
             var descendants = new List<LinuxProcess>();
@@ -83,7 +88,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                     var root = json.RootElement;
                     var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
                     if (type == "thread.started" && root.TryGetProperty("thread_id", out var id))
-                        await sessions.SetAsync(id.GetString()!, run.Token);
+                        await sessions.SetAsync(id.GetString()!, run.Token, conversation);
                     if (type is "turn.failed" or "error") throw new InvalidOperationException("Codex reported a failed turn.");
                     progress?.Invoke(root);
                     if (type == "item.completed" && root.TryGetProperty("item", out var item) &&

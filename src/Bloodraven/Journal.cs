@@ -2,13 +2,26 @@ using System.Text.Json;
 
 namespace Bloodraven;
 
-public sealed record Job(long Id, long ChatId, string Text, bool Running = false);
-public sealed record Reply(string Id, long ChatId, string Text, int Part = 0);
+public sealed record Attachment(string FileId, string Name, bool Image, long Size = 0);
+public sealed record Job(long Id, long ChatId, string Text, bool Running = false,
+    string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null,
+    long? ProgressMessageId = null, bool ApprovalRequired = false);
+public sealed record Reply(string Id, long ChatId, string Text, int Part = 0,
+    InlineButton[][]? Buttons = null, long? EditMessageId = null, long? ProgressJobId = null, string? DocumentPath = null, bool Plain = false);
+public sealed record Schedule(string Id, long ChatId, string Prompt, string Conversation,
+    string Timing, DateTimeOffset NextRun, bool Paused = false);
+public sealed record TaskOutcome(long Id, string Conversation, string Status, DateTimeOffset Finished);
 public sealed class JournalData
 {
     public long Offset { get; set; }
     public List<Job> Jobs { get; set; } = [];
     public List<Reply> Replies { get; set; } = [];
+    public string ActiveConversation { get; set; } = "default";
+    public List<string> Conversations { get; set; } = ["default"];
+    public List<Schedule> Schedules { get; set; } = [];
+    public List<TaskOutcome> Outcomes { get; set; } = [];
+    public bool? Approvals { get; set; }
+    public long NextScheduledId { get; set; } = -1;
 }
 
 // Offset and accepted work commit together; failed writes never advance memory.
@@ -24,11 +37,16 @@ public sealed class Journal(AppOptions options)
                 ?? throw new InvalidDataException("Invalid journal; restore it from backup instead of discarding work.");
         await ChangeAsync(d =>
         {
+            d.Replies.RemoveAll(r => r.Buttons?.SelectMany(row => row).Any(b => b.Data.StartsWith("approve:", StringComparison.Ordinal)) == true);
             foreach (var job in d.Jobs.Where(j => j.Running).ToArray())
             {
                 AddReply(d, job.ChatId, $"Task {job.Id} was interrupted by a restart. It may have made changes; review them before sending it again. It has NOT been rerun.");
                 d.Jobs.Remove(job);
+                d.Outcomes.Add(new TaskOutcome(job.Id, job.Conversation, "Interrupted by restart", DateTimeOffset.UtcNow));
+                if (job.ProgressMessageId is > 0)
+                    d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, "Interrupted by restart", EditMessageId: job.ProgressMessageId));
             }
+            if (d.Outcomes.Count > 50) d.Outcomes.RemoveRange(0, d.Outcomes.Count - 50);
         }, token);
     }
     public async Task<JournalData> SnapshotAsync(CancellationToken token)
@@ -50,7 +68,12 @@ public sealed class Journal(AppOptions options)
         finally { gate.Release(); }
     }
     // Records/strings are immutable; copying the lists avoids repeatedly serialising large replies just to inspect the queue.
-    static JournalData Clone(JournalData value) => new() { Offset = value.Offset, Jobs = [.. value.Jobs], Replies = [.. value.Replies] };
+    static JournalData Clone(JournalData value) => new() {
+        Offset = value.Offset, Jobs = [.. value.Jobs], Replies = [.. value.Replies],
+        ActiveConversation = value.ActiveConversation, Conversations = [.. value.Conversations],
+        Schedules = [.. value.Schedules], Outcomes = [.. value.Outcomes], Approvals = value.Approvals,
+        NextScheduledId = value.NextScheduledId
+    };
     public static void AddReply(JournalData data, long chatId, string text) =>
         data.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chatId, text));
 }
@@ -74,29 +97,38 @@ public static class AtomicFile
 public sealed class SessionStore(AppOptions options)
 {
     readonly SemaphoreSlim gate = new(1);
-    string FilePath => Path.Combine(options.StateDirectory, "session.txt");
-    public async Task<string?> GetAsync(CancellationToken token)
+    static readonly System.Text.RegularExpressions.Regex NamePattern = new("^[a-z0-9][a-z0-9_-]{0,31}$");
+    public static bool ValidName(string name) => NamePattern.IsMatch(name);
+    string FilePath(string name, bool approved)
+    {
+        if (!ValidName(name)) throw new InvalidDataException("Conversation names use 1–32 lowercase letters, digits, underscores or hyphens.");
+        return name == "default" && !approved ? Path.Combine(options.StateDirectory, "session.txt") :
+            Path.Combine(options.StateDirectory, "sessions", name + (approved ? ".approved" : "") + ".txt");
+    }
+    public async Task<string?> GetAsync(CancellationToken token, string name = "default", bool approved = false)
     {
         await gate.WaitAsync(token);
         try
         {
-            if (!File.Exists(FilePath)) return null;
-            var id = (await File.ReadAllTextAsync(FilePath, token)).Trim();
-            return Guid.TryParse(id, out _) ? id : throw new InvalidDataException("Invalid saved session ID. Use /new to reset it.");
+            var path = FilePath(name, approved);
+            if (!File.Exists(path)) return null;
+            var id = (await File.ReadAllTextAsync(path, token)).Trim();
+            return ValidId(id) ? id : throw new InvalidDataException("Invalid saved session ID. Use /new to reset it.");
         }
         finally { gate.Release(); }
     }
-    public async Task SetAsync(string id, CancellationToken token)
+    static bool ValidId(string id) => System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_-]{1,128}$");
+    public async Task SetAsync(string id, CancellationToken token, string name = "default", bool approved = false)
     {
-        if (!Guid.TryParse(id, out _)) throw new InvalidDataException("Codex returned an invalid session ID.");
+        if (!ValidId(id)) throw new InvalidDataException("Codex returned an invalid session ID.");
         await gate.WaitAsync(token);
-        try { await AtomicFile.WriteAsync(FilePath, id, token); }
+        try { await AtomicFile.WriteAsync(FilePath(name, approved), id, token); }
         finally { gate.Release(); }
     }
-    public async Task ClearAsync(CancellationToken token)
+    public async Task ClearAsync(CancellationToken token, string name = "default")
     {
         await gate.WaitAsync(token);
-        try { File.Delete(FilePath); }
+        try { File.Delete(FilePath(name, false)); File.Delete(FilePath(name, true)); }
         finally { gate.Release(); }
     }
 }

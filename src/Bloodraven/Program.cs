@@ -1,5 +1,6 @@
 using Bloodraven;
 
+if (args.Contains("--version")) { Console.WriteLine($"Bloodraven {BotWorker.Version}"); return; }
 var builder = Host.CreateApplicationBuilder(args);
 // Telegram authenticates in the URL path: never log request URLs.
 builder.Services.AddHttpClient<TelegramClient>().RemoveAllLoggers();
