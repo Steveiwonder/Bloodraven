@@ -133,9 +133,9 @@ static async Task Runner()
 {
     using var fixture = new Fixture();
     var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
-    var activity = new TaskProgress(fixture.Options.TelegramBotToken);
+    var activity = new TaskProgress();
     using var result = JsonDocument.Parse(await runner.RunAsync("--help\n$(not-a-shell)", default, activity.Observe));
-    Assert(activity.TakeUpdate().Contains("prompt"));
+    Assert(!activity.TakeUpdate().Contains("prompt"), "Answer leaked into progress");
     Assert(result.RootElement.GetProperty("prompt").GetString() == "--help\n$(not-a-shell)");
     Assert(result.RootElement.GetProperty("secret").ValueKind == JsonValueKind.Null);
     Assert(result.RootElement.GetProperty("cwd").GetString() == fixture.Root);
@@ -246,7 +246,7 @@ static HttpResponseMessage Response(int status, string json) => new((HttpStatusC
 
 static async Task Progress()
 {
-    var progress = new TaskProgress("secret-token");
+    var progress = new TaskProgress();
     void Observe(string kind, string text)
     {
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(new { type = "item.completed", item = new { type = kind, text } }));
@@ -256,11 +256,19 @@ static async Task Progress()
     Assert(!progress.TakeUpdate().Contains("private reasoning"));
     Observe("agent_message", "Checking **services** secret-token\u001b" + new string('x', 900));
     var update = progress.TakeUpdate();
-    Assert(update.Contains("Checking **services**") && update.Contains("[redacted]"));
+    Assert(!update.Contains("Checking **services**"), "Agent message leaked into progress");
     Assert(!update.Contains("secret-token") && !update.Contains('\u001b') && update.Length < 800);
     Assert(!progress.TakeUpdate().Contains("Checking"), "Repeated old activity");
     Observe("command_execution", "sensitive raw output");
-    Assert(!progress.TakeUpdate().Contains("sensitive"));
+    update = progress.TakeUpdate();
+    Assert(update.Contains("A command finished") && !update.Contains("sensitive"));
+    foreach (var eventType in new[] { "item.started", "item.updated", "item.completed" })
+    {
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new
+        { type = eventType, item = new { type = "agent_message", text = "Final answer" } }));
+        progress.Observe(json.RootElement);
+        Assert(!progress.TakeUpdate().Contains("Final answer"));
+    }
     var count = 0;
     using var stop = new CancellationTokenSource();
     await progress.RunAsync(TimeSpan.Zero, (_, _) => { count++; return Task.CompletedTask; }, stop.Token);
@@ -306,8 +314,9 @@ static async Task WorkerProgress()
         {
             Assert(delivered.Count == 3, string.Join(";", delivered));
             Assert(delivered[0].Contains("Working"));
-            Assert(delivered[1].Contains("Still working") && delivered[1].Contains("Checking services"));
+            Assert(delivered[1].Contains("Still working") && delivered[1].Contains("A command finished"));
             Assert(delivered[2].Contains("Task complete"));
+            Assert(delivered.Count(t => t.Contains("Task complete")) == 1, "Final answer delivered twice");
         }
         Assert(worker.ExecuteTask?.IsCompleted == false);
     }

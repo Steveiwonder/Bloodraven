@@ -10,9 +10,11 @@ if "--version" in sys.argv or "login" in sys.argv:
 mode = os.environ.get("TEST_CODEX_MODE", "normal")
 prompt = sys.stdin.read()
 if mode == "progress":
-    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Checking services"}}), flush=True)
-    time.sleep(12)
+    print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "private command output"}}), flush=True)
+    # Reproduce a final answer arriving before slow process shutdown. A progress
+    # tick must occur during this delay without forwarding the answer early.
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Task complete"}}), flush=True)
+    time.sleep(12)
     sys.exit(0)
 if mode in ("sleep", "malformed"):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
