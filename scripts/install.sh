@@ -30,8 +30,9 @@ if ! git -C "${working_directory}" rev-parse --show-toplevel >/dev/null 2>&1; th
   mkdir -p -- "${working_directory}"
   git -C "${working_directory}" init
 fi
-read -r -p "Codex sandbox (read-only/workspace-write/danger-full-access) [workspace-write]: " sandbox
-sandbox="${sandbox:-workspace-write}"
+echo "Full access lets Codex use the network and all files accessible to your Linux user."
+read -r -p "Codex sandbox (read-only/workspace-write/danger-full-access) [danger-full-access]: " sandbox
+sandbox="${sandbox:-danger-full-access}"
 case "${sandbox}" in read-only|workspace-write|danger-full-access) ;; *) echo "Invalid sandbox."; exit 1 ;; esac
 
 service_user="$(id -un)"
