@@ -7,6 +7,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("model settings persist per conversation and pin scheduled jobs", ModelPreferences),
+    ("model settings reach new and resumed runners", ModelRunners),
     ("worker authenticates buttons and reports health", WorkerControls),
     ("named conversations and queue controls preserve task identity", ConversationsAndQueue),
     ("durable schedules coalesce missed runs and handle timezones", Schedules),
@@ -46,6 +48,65 @@ static async Task Throws<T>(Func<Task> action) where T : Exception
     try { await action(); }
     catch (T) { return; }
     throw new Exception($"Expected {typeof(T).Name}");
+}
+static async Task ModelPreferences()
+{
+    using var fixture = new Fixture();
+    var journal = new Journal(fixture.Options);
+    await journal.InitializeAsync(default);
+    await journal.ChangeAsync(d =>
+    {
+        Assert(BotCommands.Apply(d, 123, "/model example-model", false));
+        BotCommands.Apply(d, 123, "/preset thorough", false);
+        Assert(ModelSettings.For(d, "default") == new ModelSettings("example-model", "high"));
+        d.Schedules.Add(new Schedule("test", 123, "check", "default", "every 1m", DateTimeOffset.UtcNow.AddMinutes(-1)));
+        Scheduling.EnqueueDue(d, DateTimeOffset.UtcNow, false);
+        BotCommands.Apply(d, 123, "/reasoning low", false);
+        Assert(d.Jobs.Single().Settings == new ModelSettings("example-model", "high"));
+        BotCommands.Apply(d, 123, "/conversation other", false);
+        Assert(ModelSettings.For(d, "other") == new ModelSettings());
+        BotCommands.Apply(d, 123, "/model other-model", false);
+        foreach (var invalid in new[] { "/model --help", "/model bad\"value", "/model x y", "/model " + new string('x', 129), "/reasoning invalid", "/preset invalid" })
+            BotCommands.Apply(d, 123, invalid, false);
+        Assert(ModelSettings.For(d, "other") == new ModelSettings("other-model"));
+    }, default);
+    var snapshot = await journal.SnapshotAsync(default);
+    snapshot.ModelSettings.Clear();
+    Assert((await journal.SnapshotAsync(default)).ModelSettings.Count == 2, "Snapshot mutated live settings");
+    var restarted = new Journal(fixture.Options);
+    await restarted.InitializeAsync(default);
+    var state = await restarted.SnapshotAsync(default);
+    Assert(ModelSettings.For(state, "default") == new ModelSettings("example-model", "low"));
+    Assert(state.Jobs.Single().Settings == new ModelSettings("example-model", "high"));
+    BotCommands.Apply(state, 123, "/conversation default", false);
+    BotCommands.Apply(state, 123, "/model default", false);
+    BotCommands.Apply(state, 123, "/reasoning default", false);
+    Assert(ModelSettings.For(state, "default") == new ModelSettings());
+    foreach (var pair in new[] { ("fast", "low"), ("balanced", "medium"), ("thorough", "high") })
+    {
+        BotCommands.Apply(state, 123, "/preset " + pair.Item1, false);
+        Assert(ModelSettings.For(state, "default").Effort == pair.Item2);
+    }
+    var legacy = JsonSerializer.Deserialize<JournalData>("{\"Jobs\":[{\"Id\":1,\"ChatId\":123,\"Text\":\"test\"}]}")!;
+    Assert(legacy.ModelSettings.Count == 0 && legacy.Jobs.Single().Settings is null);
+}
+static async Task ModelRunners()
+{
+    using var fixture = new Fixture();
+    var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
+    foreach (var settings in new[] { new ModelSettings("example-model", "high"), new ModelSettings("second-model", "low"), new ModelSettings() })
+    {
+        using var json = JsonDocument.Parse(await runner.RunAsync("test", default, settings: settings));
+        var args = json.RootElement.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+        Assert(args.Contains("model=\"" + settings.Model + "\"") == (settings.Model is not null));
+        Assert(args.Contains("model_reasoning_effort=\"" + settings.Effort + "\"") == (settings.Effort is not null));
+        Assert(args.Contains("--sandbox") && args.Contains(fixture.Options.Sandbox));
+    }
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "model-settings");
+    foreach (var name in new[] { "start", "resume" })
+        Assert(await runner.RunAsync(name, default, approve: (_, _, _) => Task.FromResult(false),
+            settings: new ModelSettings("example-model", "high")) == "decline");
+    await Throws<InvalidDataException>(() => runner.RunAsync("invalid", default, settings: new ModelSettings("x\";bad")));
 }
 static Task Formatting()
 {
