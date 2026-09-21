@@ -31,7 +31,7 @@ Bloodraven remembers the directory in which you launch this command and offers i
 The interactive setup will:
 
 1. install the required Ubuntu packages;
-2. install the .NET 8 SDK if needed;
+2. install the .NET 10 SDK if needed;
 3. install the Codex CLI using OpenAI's official installer if needed;
 4. pause for Codex sign-in if this machine is not already authenticated;
 5. download the latest Bloodraven source;
@@ -115,12 +115,17 @@ sudo journalctl -u bloodraven -f
 sudo systemctl restart bloodraven
 ```
 
-To change configuration, edit `/etc/bloodraven/bloodraven.env`, then restart the service. To upgrade:
+To change configuration, edit `/etc/bloodraven/bloodraven.env`, then restart the service.
+
+## Upgrade an existing installation
+
+Run this as the same Linux user that originally installed Bloodraven:
 
 ```bash
-git pull
-./scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/Steveiwonder/Bloodraven/master/upgrade.sh -o /tmp/bloodraven-upgrade.sh && bash /tmp/bloodraven-upgrade.sh
 ```
+
+The upgrader installs the .NET 10 SDK if necessary, downloads and builds the latest Bloodraven, refreshes its systemd service, and verifies that it starts. It preserves the Telegram configuration, authorised user/chat IDs, Codex working directory, saved Codex session, sandbox choice, and existing Codex authentication.
 
 ## Configuration
 
@@ -145,7 +150,7 @@ dotnet build
 dotnet run --project src/Bloodraven
 ```
 
-Set the variables listed above before running locally. Bloodraven has no third-party .NET package dependencies.
+Set the variables listed above before running locally. Bloodraven targets .NET 10 and has no third-party .NET package dependencies.
 
 ## Licence
 
