@@ -141,7 +141,7 @@ New releases are staged under `/opt/bloodraven/releases/` before the old service
 
 While Codex works, Bloodraven sends a short update every 30 seconds by default, showing elapsed time and command/file/tool activity. When there is nothing new, it sends “Still working…” with the elapsed time. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress.
 
-Installation and interactive upgrades ask for the interval in seconds: **10–3600**, or **0** to disable updates. Press Enter to keep the displayed value. Existing installations without the setting use **30 seconds**. Non-interactive upgrades preserve settings without prompting.
+Installation asks for the interval in seconds: **10–3600**, or **0** to disable updates. Upgrades keep a saved value without asking again, including **0**. An interactive upgrade only prompts when the setting is missing; press Enter to accept **30 seconds**. Non-interactive upgrades preserve settings without prompting; when the setting is absent, the application defaults to **30 seconds**.
 
 To change it later, run `sudo nano /etc/bloodraven/bloodraven.env`, set `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"` (for example), save, then run `sudo systemctl restart bloodraven`.
 

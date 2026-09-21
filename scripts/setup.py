@@ -130,12 +130,12 @@ def progress_config(path):
     current = "30"
     if matches:
         current = validate_progress(matches[-1].split("=", 1)[1].strip().strip('\"').strip("'"))
+        print(f"Keeping saved Telegram progress interval: {current}s.")
+        return
     if not sys.stdin.isatty():
         print(f"Keeping Telegram progress interval: {current}s (non-interactive upgrade).")
         return
     chosen = prompt_progress(current)
-    if matches and chosen == current:
-        return
     updated = re.sub(pattern, "", original, flags=re.MULTILINE).rstrip('\n') + f'\n{PROGRESS_KEY}="{chosen}"\n'
     stat = path.stat()
     fd, temporary = tempfile.mkstemp(prefix=".progress-", dir=path.parent)
