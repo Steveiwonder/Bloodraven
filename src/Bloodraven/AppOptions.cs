@@ -12,6 +12,14 @@ public sealed class AppOptions
     public string CodexExecutable { get; } = Environment.GetEnvironmentVariable("BLOODRAVEN_CODEX_EXECUTABLE") ?? "codex";
     public string Sandbox { get; } = ValidateSandbox(Environment.GetEnvironmentVariable("BLOODRAVEN_CODEX_SANDBOX") ?? "workspace-write");
     public int TaskTimeoutSeconds { get; } = Timeout();
+    public int ProgressIntervalSeconds { get; } = ProgressInterval();
+
+    static int ProgressInterval()
+    {
+        var value = Environment.GetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS");
+        return value is null ? 30 : int.TryParse(value, out var n) && (n == 0 || n is >= 10 and <= 3600) ? n
+            : throw new InvalidOperationException("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS must be 0 (off) or 10–3600.");
+    }
 
     static string Required(string name) => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name))
         ? Environment.GetEnvironmentVariable(name)! : throw new InvalidOperationException($"Missing {name}.");
