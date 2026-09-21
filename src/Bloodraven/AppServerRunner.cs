@@ -121,7 +121,7 @@ public static class AppServerRunner
         }
         try
         {
-            await Request("initialize", new { clientInfo = new { name = "bloodraven", version = "0.2.0" } });
+            await Request("initialize", new { clientInfo = new { name = "bloodraven", version = BotWorker.Version } });
             await Write(new { method = "initialized", @params = new { } });
             var saved = await sessions.GetAsync(token, conversation, approved: true);
             var thread = saved is null
