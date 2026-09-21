@@ -22,6 +22,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("worker survives delivery outage and executes work once", WorkerOutage),
     ("progress is bounded, selective, and stops on cancellation", Progress),
     ("worker sends progress before the final answer", WorkerProgress),
+    ("progress tracks real command state and redacts excerpts", DetailedProgress),
 };
 var failures = 0;
 foreach (var test in tests)
@@ -277,6 +278,40 @@ static async Task Progress()
     { if (++count == 2) stop.Cancel(); return Task.CompletedTask; }, stop.Token);
     await Throws<OperationCanceledException>(() => loop.WaitAsync(TimeSpan.FromSeconds(5)));
     Assert(count == 2);
+}
+
+static Task DetailedProgress()
+{
+    var progress = new TaskProgress("bridge-secret");
+    void Event(string type, string id, string command, string output, int? exit = null)
+    {
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new { type,
+            item = new { type = "command_execution", id, command, aggregated_output = output, exit_code = exit } }));
+        progress.Observe(json.RootElement);
+    }
+    Event("item.started", "a", "docker inspect plex", "");
+    var update = progress.TakeUpdate();
+    Assert(update.Contains("0 completed, 1 running") && update.Contains("docker inspect plex") && update.Contains("observed for"));
+    Event("item.updated", "a", "docker inspect plex", "healthy\nTOKEN=hidden PASSWORD=\"two words\"\nBearer hidden-auth bridge-secret");
+    update = progress.TakeUpdate();
+    Assert(update.Contains("healthy") && update.Contains("[redacted]"));
+    Assert(!update.Contains("hidden") && !update.Contains("two words") && !update.Contains("bridge-secret"));
+    Assert(progress.TakeUpdate().Contains("No new command output"));
+    Event("item.completed", "a", "docker inspect plex", "done", 0);
+    Event("item.completed", "a", "docker inspect plex", "done", 0);
+    Event("item.started", "b", "sleep 10", "");
+    update = progress.TakeUpdate();
+    Assert(update.Contains("1 completed, 1 running") && update.Contains("exit 0") && update.Contains("sleep 10"));
+    Assert(!progress.TakeUpdate().Contains("A command finished"), "Old completion repeated");
+    Event("item.completed", "b", "sleep 10", "", null);
+    Assert(progress.TakeUpdate().Contains("exit code unavailable"));
+    Event("item.started", "c", "curl --token sensitive", "-----BEGIN PRIVATE KEY-----\nsecret material");
+    update = progress.TakeUpdate();
+    Assert(!update.Contains("sensitive") && !update.Contains("secret material"));
+    for (var i = 0; i < 8; i++) Event("item.updated", "c", new string('x', 2000), new string('y', 5000) + i);
+    update = progress.TakeUpdate();
+    Assert(update.Length < 3500 && TelegramFormatter.Format(update).Count == 1);
+    return Task.CompletedTask;
 }
 
 static async Task WorkerProgress()
