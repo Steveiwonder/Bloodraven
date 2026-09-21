@@ -60,6 +60,7 @@ You do not need a webhook, public IP address, domain name, or open firewall port
 3. Return to the terminal, press Enter, and confirm the displayed numeric Telegram user and chat IDs by typing `yes`. Unrelated messages and group chats cannot claim ownership.
 4. Confirm the displayed working repository by pressing Enter, or type a different path. If the selected directory is not already a Git repository, setup asks before initialising one.
 5. Choose a Codex sandbox. Press Enter to accept the safer `workspace-write` default.
+6. Choose how often Telegram should receive progress updates. Press Enter for **30 seconds**, enter **10–3600** seconds, or enter **0** to turn them off.
 
 The installer builds Bloodraven, stores its private settings outside the Git repository, installs a systemd service, and starts it automatically.
 
@@ -136,6 +137,16 @@ The upgrader installs the .NET 10 SDK if necessary, downloads and builds the lat
 
 New releases are staged under `/opt/bloodraven/releases/` before the old service is stopped. The service validates its repository, Codex login and Telegram token under the real service account, then the upgrader waits for successful polling. If activation fails, it attempts to restore and restart the previous service. Old releases and service backups are retained for recovery rather than automatically deleted. The original flat `/opt/bloodraven` installation is supported as a rollback target.
 
+### Progress during long tasks
+
+While Codex works, Bloodraven sends a short update every 30 seconds by default, showing elapsed time and the latest available Codex message or command/file/tool activity. When there is nothing new, it sends “Still working…” with the elapsed time. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress.
+
+Installation and interactive upgrades ask for the interval in seconds: **10–3600**, or **0** to disable updates. Press Enter to keep the displayed value. Existing installations without the setting use **30 seconds**. Non-interactive upgrades preserve settings without prompting.
+
+To change it later, run `sudo nano /etc/bloodraven/bloodraven.env`, set `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"` (for example), save, then run `sudo systemctl restart bloodraven`.
+
+Updates contain short Codex message excerpts and general activity descriptions. Raw command output, stderr, tool payloads, and reasoning events are not forwarded. Progress stops when the task finishes, fails, or is cancelled. Updates are skipped during delivery problems instead of being saved for later; the final answer still uses the persistent reply queue. Telegram delivery and rate limits can delay updates, so the interval is not an exact delivery guarantee.
+
 ### Restart and delivery behaviour
 
 - Accepted work and Telegram update IDs are stored together in `/var/lib/bloodraven/journal.json` before acknowledgement. Queued tasks survive restarts.
@@ -157,6 +168,7 @@ New releases are staged under `/opt/bloodraven/releases/` before the old service
 | `BLOODRAVEN_CODEX_EXECUTABLE` | no | `codex` | Absolute path or executable name |
 | `BLOODRAVEN_CODEX_SANDBOX` | no | `workspace-write` | `read-only`, `workspace-write`, or `danger-full-access` |
 | `BLOODRAVEN_TASK_TIMEOUT_SECONDS` | no | `3600` | Task time limit, 30–86400 seconds |
+| `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS` | no | `30` | Progress interval, 10–3600 seconds; `0` disables updates |
 
 Only private chats are accepted. If the optional chat ID is set, it must be a valid positive integer; malformed configuration fails startup rather than removing the restriction.
 
