@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("tables become readable Telegram sections", Tables),
     ("model settings persist per conversation and pin scheduled jobs", ModelPreferences),
     ("model settings reach new and resumed runners", ModelRunners),
     ("worker authenticates buttons and reports health", WorkerControls),
@@ -107,6 +108,31 @@ static async Task ModelRunners()
         Assert(await runner.RunAsync(name, default, approve: (_, _, _) => Task.FromResult(false),
             settings: new ModelSettings("example-model", "high")) == "decline");
     await Throws<InvalidDataException>(() => runner.RunAsync("invalid", default, settings: new ModelSettings("x\";bad")));
+}
+static Task Tables()
+{
+    var parts = TelegramFormatter.Format("Intro\n\n| Addition | Benefits |\n|---|---|\n| [Uptime Kuma](https://example.com/) | Monitor **Plex** & servers |\n| Backups | Alert on failures |\n\nEnd");
+    var html = string.Concat(parts.Select(p => p.Html));
+    var plain = string.Concat(parts.Select(p => p.Plain));
+    Assert(html.Contains("<b><a href=\"https://example.com/\">Uptime Kuma</a></b>"));
+    Assert(plain.Contains("Uptime Kuma\nMonitor Plex & servers\n\nBackups\nAlert on failures"));
+    Assert(!plain.Contains("|---") && plain.StartsWith("Intro") && plain.EndsWith("End"));
+    var multi = TelegramFormatter.Format("Host | Status | Command\n:---|---:|:---:\nserver02 | Healthy | `echo a|b`\nother | A\\|B | done");
+    Assert(multi[0].Plain.Contains("server02\nStatus: Healthy\nCommand: echo a|b"));
+    Assert(multi[0].Plain.Contains("Status: A|B"));
+    var code = "| A | B |\n|---|---|\n| x | y |";
+    Assert(string.Concat(TelegramFormatter.Format("```\n" + code + "\n```").Select(p => p.Plain)).TrimEnd() == code);
+    var malformed = "a|b\nnot a divider\nx|y";
+    Assert(TelegramFormatter.Format(malformed)[0].Plain == malformed);
+    var longTable = "A|B\n---|---\n[Link](https://example.com/)|" + string.Concat(Enumerable.Repeat("😀<tag>& ", 1000));
+    foreach (var p in TelegramFormatter.Format(longTable, 100))
+    {
+        Assert(p.Plain.Length <= 100 && !char.IsHighSurrogate(p.Plain[^1]));
+        _ = XElement.Parse("<root>" + p.Html + "</root>");
+        Assert(!p.Html.Contains("<tag>"));
+    }
+    foreach (var p in parts.Concat(multi)) _ = XElement.Parse("<root>" + p.Html + "</root>");
+    return Task.CompletedTask;
 }
 static Task Formatting()
 {

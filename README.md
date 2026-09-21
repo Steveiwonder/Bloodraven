@@ -62,7 +62,7 @@ You do not need a webhook, public IP address, domain name, or open firewall port
 2. When prompted, open a **private** chat with the bot and send the exact `/start <one-time-code>` command printed by setup. The code expires after ten minutes.
 3. Return to the terminal, press Enter, and confirm the displayed numeric Telegram user and chat IDs by typing `yes`. Unrelated messages and group chats cannot claim ownership.
 4. Confirm the displayed working repository by pressing Enter, or type a different path. If the selected directory is not already a Git repository, setup asks before initialising one.
-5. Choose a Codex sandbox. Press Enter to accept the safer `workspace-write` default.
+5. Choose a Codex sandbox. Press Enter for `danger-full-access`, allowing network access and access to files available to your Linux user.
 6. Choose how often Telegram should receive progress updates. Press Enter for **30 seconds**, enter **10–3600** seconds, or enter **0** to turn them off.
 7. Choose whether to enable approval buttons. Press Enter for **off**, which preserves the usual sandbox behaviour, or enter **on** for the approval mode explained below.
 
@@ -94,7 +94,7 @@ sudo journalctl -u bloodraven -n 100 --no-pager
 
 ### Permissions
 
-The default `workspace-write` sandbox lets Codex edit the selected working repository. Choose `read-only` if it should only inspect files. Choose `danger-full-access` only if Codex must administer systems outside the repository and you understand that your Telegram account then becomes a powerful remote-control interface to that machine.
+New installations default to `danger-full-access` with approvals off, suitable for administering your homelab over the network. Your Telegram account becomes a powerful remote-control interface to files and systems accessible to the service user. Choose `workspace-write` for restricted repository work or `read-only` for inspection. Existing installations retain their saved settings on upgrade; the runtime fallback when no sandbox setting exists remains `workspace-write`. Enabling approval mode uses its separate read-only sandbox regardless of this installation choice.
 
 ### Inspect before running
 
@@ -161,7 +161,7 @@ This is Codex's native approval boundary, not a filter that guesses whether ever
 
 Approval mode uses a separate session history for each conversation. Turning it on also upgrades pending tasks to require this mode; turning it off applies only to newly queued tasks. Running work keeps the policy it started with. `/approvals` shows the setting, which is saved across restarts. Existing installations keep approvals off unless explicitly enabled; upgrades do not introduce another prompt. The installation environment default is `BLOODRAVEN_APPROVALS="off"`; a saved `/approvals` choice takes precedence.
 
-Replies support **bold**, italics, strikethrough, inline code, fenced code, headings, HTTP(S) links, and bullet lists through a conservative Markdown-to-HTML formatter. Unsupported or unmatched syntax remains readable text. Raw HTML is escaped, links do not generate previews, and each long-message chunk has complete formatting tags without splitting emoji. If Telegram rejects HTML parsing, the affected chunk is sent as plain text. This is not a full CommonMark renderer; complex nesting and tables may remain plain text.
+Replies support **bold**, italics, strikethrough, inline code, fenced code, headings, HTTP(S) links, and bullet lists through a conservative Markdown-to-HTML formatter. Markdown tables become readable sections: two-column rows use a bold title and description; wider tables use a bold title and labelled fields. Links stay clickable, and tables inside fenced code stay unchanged. Unsupported or unmatched syntax remains readable text. Raw HTML is escaped, links do not generate previews, and each long-message chunk has complete formatting tags without splitting emoji. If Telegram rejects HTML parsing, the affected chunk is sent as plain text. This is not a full CommonMark renderer; complex nesting may remain plain text.
 
 ## Operations
 
