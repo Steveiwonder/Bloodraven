@@ -25,14 +25,14 @@ public sealed class TelegramClient(HttpClient http, AppOptions options)
         try
         {
             result = await CallAsync<JsonElement>(method, new { chat_id = chatId, message_id = editMessageId,
-                reply_markup = buttons is null ? null : new { inline_keyboard = buttons }, text = message.Html,
+                reply_markup = buttons is null && !editMessageId.HasValue ? null : new { inline_keyboard = buttons ?? [] }, text = message.Html,
                 parse_mode = "HTML", link_preview_options = new { is_disabled = true } }, token);
         }
         catch (TelegramException ex) when (ex.Formatting)
         {
             // A parser rejection must not prevent the answer from reaching its owner.
             result = await CallAsync<JsonElement>(method, new { chat_id = chatId, message_id = editMessageId,
-                reply_markup = buttons is null ? null : new { inline_keyboard = buttons }, text = message.Plain,
+                reply_markup = buttons is null && !editMessageId.HasValue ? null : new { inline_keyboard = buttons ?? [] }, text = message.Plain,
                 link_preview_options = new { is_disabled = true } }, token);
         }
         return editMessageId ?? (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("message_id", out var id) ? id.GetInt64() : 0);

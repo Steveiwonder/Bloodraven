@@ -128,7 +128,11 @@ public sealed class SessionStore(AppOptions options)
     public async Task ClearAsync(CancellationToken token, string name = "default")
     {
         await gate.WaitAsync(token);
-        try { File.Delete(FilePath(name, false)); File.Delete(FilePath(name, true)); }
+        try
+        {
+            foreach (var path in new[] { FilePath(name, false), FilePath(name, true) })
+                if (File.Exists(path)) File.Delete(path);
+        }
         finally { gate.Release(); }
     }
 }

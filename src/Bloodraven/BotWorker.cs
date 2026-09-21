@@ -6,6 +6,8 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     readonly SemaphoreSlim sendGate = new(1, 1);
     readonly ApprovalBroker approvals = new(journal);
     readonly AttachmentStore attachments = new(options, telegram);
+    readonly object taskGate = new();
+    CancellationTokenSource? activeTask;
     DateTimeOffset nextSend;
     DateTimeOffset? lastPoll;
     public static string Version => typeof(BotWorker).Assembly.GetName().Version?.ToString(3) ?? "unknown";
@@ -147,9 +149,10 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 }, token);
                 if (allowed && error is null && command == "/cancel")
                 {
-                    var cancelled = codex.Cancel();
+                    bool cancelled;
+                    lock (taskGate) { cancelled = activeTask is not null; activeTask?.Cancel(); }
                     await journal.ChangeAsync(d => Journal.AddReply(d, message!.Chat.Id,
-                        cancelled ? "Cancellation requested; queued tasks are unaffected." : "No Codex task is running."), token);
+                        cancelled ? "Cancellation requested; queued tasks are unaffected." : "No task is running."), token);
                 }
                 state = await journal.SnapshotAsync(token);
                 if (state.Replies.Count >= 100) break;
@@ -213,6 +216,9 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, $"Working… · {job.Conversation}", ProgressJobId: job.Id));
             }, token);
             if (job is null) continue;
+            using var taskLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+            taskLifetime.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
+            lock (taskGate) activeTask = taskLifetime;
             string result;
             string outcome = "Completed";
             string? document = null;
@@ -221,12 +227,12 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 switch (Command(job.Text))
                 {
                     case "/new":
-                        await sessions.ClearAsync(token, job.Conversation);
+                        await sessions.ClearAsync(taskLifetime.Token, job.Conversation);
                         result = $"Started a fresh Codex conversation: {job.Conversation}."; break;
                     case "/file":
-                        document = await attachments.ExportAsync(job.Text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1) ?? "", token);
+                        document = await attachments.ExportAsync(job.Text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1) ?? "", taskLifetime.Token);
                         result = $"File: {Path.GetFileName(document)}"; break;
-                    default: result = await RunWithProgressAsync(job, token); break;
+                    default: result = await RunWithProgressAsync(job, taskLifetime.Token); break;
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
@@ -238,6 +244,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 outcome = "Failed";
                 result = "Task failed. Check Codex login, repository permissions, attachments and saved session locally; /new resets a broken session. Review changes before retrying.";
             }
+            finally { lock (taskGate) activeTask = null; }
             await journal.ChangeAsync(d =>
             {
                 var current = d.Jobs.FirstOrDefault(j => j.Id == job.Id);
