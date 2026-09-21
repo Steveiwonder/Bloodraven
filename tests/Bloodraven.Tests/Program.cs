@@ -305,9 +305,10 @@ static Task DetailedProgress()
     Assert(!progress.TakeUpdate().Contains("A command finished"), "Old completion repeated");
     Event("item.completed", "b", "sleep 10", "", null);
     Assert(progress.TakeUpdate().Contains("exit code unavailable"));
-    Event("item.started", "c", "curl --token sensitive", "-----BEGIN PRIVATE KEY-----\nsecret material");
+    var fakeCredential = Guid.NewGuid().ToString("N"); // Generated test data, never a real credential.
+    Event("item.started", "c", $"curl --token {fakeCredential}", "-----BEGIN PRIVATE KEY-----\nsecret material");
     update = progress.TakeUpdate();
-    Assert(!update.Contains("sensitive") && !update.Contains("secret material"));
+    Assert(!update.Contains(fakeCredential) && !update.Contains("secret material"));
     for (var i = 0; i < 8; i++) Event("item.updated", "c", new string('x', 2000), new string('y', 5000) + i);
     update = progress.TakeUpdate();
     Assert(update.Length < 3500 && TelegramFormatter.Format(update).Count == 1);
