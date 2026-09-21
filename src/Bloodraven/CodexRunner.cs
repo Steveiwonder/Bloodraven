@@ -21,7 +21,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         }
     }
 
-    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken)
+    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null)
     {
         using var run = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         run.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
@@ -85,6 +85,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                     if (type == "thread.started" && root.TryGetProperty("thread_id", out var id))
                         await sessions.SetAsync(id.GetString()!, run.Token);
                     if (type is "turn.failed" or "error") throw new InvalidOperationException("Codex reported a failed turn.");
+                    progress?.Invoke(root);
                     if (type == "item.completed" && root.TryGetProperty("item", out var item) &&
                         item.TryGetProperty("type", out var kind) && kind.GetString() == "agent_message" &&
                         item.TryGetProperty("text", out var text))

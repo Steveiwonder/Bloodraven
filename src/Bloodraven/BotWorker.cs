@@ -3,6 +3,51 @@ namespace Bloodraven;
 public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, SessionStore sessions,
     Journal journal, AppOptions options, ILogger<BotWorker> logger) : BackgroundService
 {
+    readonly SemaphoreSlim sendGate = new(1, 1);
+    DateTimeOffset nextSend;
+
+    async Task SendPacedAsync(long chatId, FormattedMessage message, CancellationToken token)
+    {
+        await sendGate.WaitAsync(token);
+        try
+        {
+            var delay = nextSend - DateTimeOffset.UtcNow;
+            if (delay > TimeSpan.Zero) await Task.Delay(delay, token);
+            await telegram.SendAsync(chatId, message, token);
+            nextSend = DateTimeOffset.UtcNow.AddMilliseconds(1100);
+        }
+        catch (TelegramException ex)
+        {
+            nextSend = DateTimeOffset.UtcNow.AddSeconds(ex.RetryAfter);
+            throw;
+        }
+        finally { sendGate.Release(); }
+    }
+
+    async Task<string> RunWithProgressAsync(Job job, CancellationToken token)
+    {
+        var progress = new TaskProgress(options.TelegramBotToken);
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var reporting = progress.RunAsync(TimeSpan.FromSeconds(options.ProgressIntervalSeconds), async (text, ct) =>
+        {
+            // Let queued acknowledgements and final replies go first; never queue stale progress.
+            if ((await journal.SnapshotAsync(ct)).Replies.Count != 0) return;
+            try { await SendPacedAsync(job.ChatId, TelegramFormatter.Format(text)[0], ct); }
+            catch (TelegramException ex)
+            {
+                logger.LogWarning("Progress delivery unavailable (status {Status}); skipping update.", ex.Status);
+                await Task.Delay(TimeSpan.FromSeconds(ex.RetryAfter), ct);
+            }
+        }, lifetime.Token);
+        try { return await codex.RunAsync(job.Text, token, progress.Observe); }
+        finally
+        {
+            lifetime.Cancel();
+            try { await reporting; }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         Directory.CreateDirectory(options.StateDirectory);
@@ -107,7 +152,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                         await sessions.ClearAsync(token);
                         result = "Started a fresh Codex conversation.";
                         break;
-                    default: result = await codex.RunAsync(job.Text, token); break;
+                    default: result = await RunWithProgressAsync(job, token); break;
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
@@ -135,14 +180,13 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             var parts = TelegramFormatter.Format(reply.Text);
             try
             {
-                await telegram.SendAsync(reply.ChatId, parts[reply.Part], token);
+                await SendPacedAsync(reply.ChatId, parts[reply.Part], token);
                 await journal.ChangeAsync(d =>
                 {
                     var index = d.Replies.FindIndex(r => r.Id == reply.Id);
                     if (reply.Part + 1 == parts.Count) d.Replies.RemoveAt(index);
                     else d.Replies[index] = reply with { Part = reply.Part + 1 };
                 }, token);
-                await Task.Delay(1100, token); // Pace replies to the single private chat.
             }
             catch (TelegramException ex)
             {

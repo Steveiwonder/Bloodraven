@@ -19,6 +19,36 @@ setup, deploy = module("setup"), module("deploy")
 
 
 class PairingTests(unittest.TestCase):
+    def test_progress_validation(self):
+        for value in ('0', '10', '30', '3600'):
+            self.assertEqual(setup.validate_progress(value), value)
+        for value in ('-1', '1', '3601', 'oops', '1\nUser=root'):
+            self.assertRaises(ValueError, setup.validate_progress, value)
+
+    def test_progress_upgrade_preserves_secrets_and_other_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings.env'
+            original = 'BLOODRAVEN_TELEGRAM_BOT_TOKEN="secret"\nBLOODRAVEN_WORKING_DIRECTORY="/repo with spaces"\n'
+            path.write_text(original)
+            with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='60'):
+                setup.progress_config(path)
+            self.assertTrue(path.read_text().startswith(original))
+            self.assertIn('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"', path.read_text())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='0'):
+                setup.progress_config(path)
+            self.assertEqual(path.read_text().count('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS='), 1)
+            self.assertIn('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="0"', path.read_text())
+
+    def test_noninteractive_upgrade_keeps_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings.env'
+            path.write_text('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"\n')
+            before = path.read_bytes()
+            with patch.object(setup.sys.stdin, 'isatty', return_value=False), patch('builtins.input', side_effect=AssertionError):
+                setup.progress_config(path)
+            self.assertEqual(path.read_bytes(), before)
+
     def message(self, user=123, text="/start nonce", date=100, kind="private"):
         return {"message": {"from": {"id": user}, "chat": {"id": user, "type": kind},
                             "text": text, "date": date}}

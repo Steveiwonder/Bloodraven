@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 import secrets
+import re
+import sys
+import tempfile
 import time
 import urllib.request
 
@@ -95,8 +98,57 @@ def config(pairing, directory, codex, sandbox, output):
         "BLOODRAVEN_STATE_DIRECTORY": "/var/lib/bloodraven",
         "BLOODRAVEN_CODEX_EXECUTABLE": codex,
         "BLOODRAVEN_CODEX_SANDBOX": sandbox,
+        "BLOODRAVEN_PROGRESS_INTERVAL_SECONDS": prompt_progress("30"),
     }
     write_private(output, "".join(f"{key}={env_quote(value)}\n" for key, value in values.items()))
+
+
+PROGRESS_KEY = "BLOODRAVEN_PROGRESS_INTERVAL_SECONDS"
+
+
+def validate_progress(value):
+    if not re.fullmatch(r"[0-9]+", value) or not (int(value) == 0 or 10 <= int(value) <= 3600):
+        raise ValueError("Enter 0 to disable updates, or 10–3600 seconds.")
+    return str(int(value))
+
+
+def prompt_progress(current):
+    while True:
+        value = input(f"Telegram progress interval in seconds (0=off, 10–3600) [{current}]: ").strip()
+        try:
+            return validate_progress(value or current)
+        except ValueError as exc:
+            print(exc)
+
+
+def progress_config(path):
+    # Never source the secret-bearing environment file as shell code.
+    path = Path(path)
+    original = path.read_text()
+    pattern = rf'^{PROGRESS_KEY}=.*$'
+    matches = re.findall(pattern, original, re.MULTILINE)
+    current = "30"
+    if matches:
+        current = validate_progress(matches[-1].split("=", 1)[1].strip().strip('\"').strip("'"))
+    if not sys.stdin.isatty():
+        print(f"Keeping Telegram progress interval: {current}s (non-interactive upgrade).")
+        return
+    chosen = prompt_progress(current)
+    if matches and chosen == current:
+        return
+    updated = re.sub(pattern, "", original, flags=re.MULTILINE).rstrip('\n') + f'\n{PROGRESS_KEY}="{chosen}"\n'
+    stat = path.stat()
+    fd, temporary = tempfile.mkstemp(prefix=".progress-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            os.fchown(handle.fileno(), stat.st_uid, stat.st_gid)
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def resolve_directory(value, invocation):
@@ -115,12 +167,16 @@ if __name__ == "__main__":
     p = sub.add_parser("config")
     for name in ("pairing", "directory", "codex", "sandbox", "output"):
         p.add_argument(name)
+    p = sub.add_parser("progress")
+    p.add_argument("path")
     args = parser.parse_args()
     try:
         if args.action == "pair":
             pair(args.output)
         elif args.action == "resolve":
             print(resolve_directory(args.value, args.invocation))
+        elif args.action == "progress":
+            progress_config(args.path)
         else:
             config(args.pairing, args.directory, args.codex, args.sandbox, args.output)
     except (RuntimeError, ValueError, OSError) as exc:

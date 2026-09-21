@@ -20,6 +20,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Telegram HTML rejection falls back to plain text", HtmlFallback),
     ("Telegram rate limits and network exceptions are sanitised", TelegramErrors),
     ("worker survives delivery outage and executes work once", WorkerOutage),
+    ("progress is bounded, selective, and stops on cancellation", Progress),
+    ("worker sends progress before the final answer", WorkerProgress),
 };
 var failures = 0;
 foreach (var test in tests)
@@ -72,6 +74,18 @@ static async Task Configuration()
 {
     using var fixture = new Fixture();
     var o = fixture.Options;
+    Assert(o.ProgressIntervalSeconds == 30);
+    foreach (var value in new[] { "0", "10", "3600" })
+    {
+        Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", value);
+        Assert(new AppOptions().ProgressIntervalSeconds == int.Parse(value));
+    }
+    foreach (var value in new[] { "-1", "1", "3601", "oops" })
+    {
+        Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", value);
+        await Throws<InvalidOperationException>(() => { _ = new AppOptions(); return Task.CompletedTask; });
+    }
+    Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", null);
     Assert(o.Accepts(new TelegramMessage(new TelegramUser(123), new TelegramChat(123, "private"), "hello")));
     Assert(!o.Accepts(new TelegramMessage(new TelegramUser(123), new TelegramChat(123, "group"), "hello")));
     Assert(!o.Accepts(new TelegramMessage(new TelegramUser(999), new TelegramChat(123, "private"), "hello")));
@@ -119,7 +133,9 @@ static async Task Runner()
 {
     using var fixture = new Fixture();
     var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
-    using var result = JsonDocument.Parse(await runner.RunAsync("--help\n$(not-a-shell)", default));
+    var activity = new TaskProgress(fixture.Options.TelegramBotToken);
+    using var result = JsonDocument.Parse(await runner.RunAsync("--help\n$(not-a-shell)", default, activity.Observe));
+    Assert(activity.TakeUpdate().Contains("prompt"));
     Assert(result.RootElement.GetProperty("prompt").GetString() == "--help\n$(not-a-shell)");
     Assert(result.RootElement.GetProperty("secret").ValueKind == JsonValueKind.Null);
     Assert(result.RootElement.GetProperty("cwd").GetString() == fixture.Root);
@@ -228,6 +244,77 @@ static async Task WorkerOutage()
 static HttpResponseMessage Response(int status, string json) => new((HttpStatusCode)status)
 { Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json") };
 
+static async Task Progress()
+{
+    var progress = new TaskProgress("secret-token");
+    void Observe(string kind, string text)
+    {
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new { type = "item.completed", item = new { type = kind, text } }));
+        progress.Observe(json.RootElement);
+    }
+    Observe("reasoning", "private reasoning");
+    Assert(!progress.TakeUpdate().Contains("private reasoning"));
+    Observe("agent_message", "Checking **services** secret-token\u001b" + new string('x', 900));
+    var update = progress.TakeUpdate();
+    Assert(update.Contains("Checking **services**") && update.Contains("[redacted]"));
+    Assert(!update.Contains("secret-token") && !update.Contains('\u001b') && update.Length < 800);
+    Assert(!progress.TakeUpdate().Contains("Checking"), "Repeated old activity");
+    Observe("command_execution", "sensitive raw output");
+    Assert(!progress.TakeUpdate().Contains("sensitive"));
+    var count = 0;
+    using var stop = new CancellationTokenSource();
+    await progress.RunAsync(TimeSpan.Zero, (_, _) => { count++; return Task.CompletedTask; }, stop.Token);
+    Assert(count == 0);
+    var loop = progress.RunAsync(TimeSpan.FromMilliseconds(10), (_, _) =>
+    { if (++count == 2) stop.Cancel(); return Task.CompletedTask; }, stop.Token);
+    await Throws<OperationCanceledException>(() => loop.WaitAsync(TimeSpan.FromSeconds(5)));
+    Assert(count == 2);
+}
+
+static async Task WorkerProgress()
+{
+    using var fixture = new Fixture();
+    Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", "10");
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "progress");
+    var options = new AppOptions();
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+        await git.WaitForExitAsync();
+    var delivered = new List<string>();
+    using var http = new HttpClient(new Handler(async (request, token) =>
+    {
+        if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
+        { await Task.Delay(50, token); return Response(200, "{\"ok\":true,\"result\":[]}"); }
+        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        lock (delivered) delivered.Add(body.RootElement.GetProperty("text").GetString()!);
+        return Response(200, "{\"ok\":true,\"result\":{}}");
+    }));
+    var journal = new Journal(options);
+    var sessions = new SessionStore(options);
+    using var worker = new BotWorker(new TelegramClient(http, options), new CodexRunner(options, sessions),
+        sessions, journal, options, NullLogger<BotWorker>.Instance);
+    await worker.StartAsync(default);
+    try
+    {
+        for (var i = 0; i < 100 && !File.Exists(Path.Combine(options.StateDirectory, "ready")); i++) await Task.Delay(50);
+        await journal.ChangeAsync(d => d.Jobs.Add(new Job(1, 123, "test progress")), default);
+        for (var i = 0; i < 400; i++)
+        {
+            lock (delivered) { if (delivered.Any(t => t.Contains("Task complete"))) break; }
+            await Task.Delay(50);
+        }
+        lock (delivered)
+        {
+            Assert(delivered.Count == 3, string.Join(";", delivered));
+            Assert(delivered[0].Contains("Working"));
+            Assert(delivered[1].Contains("Still working") && delivered[1].Contains("Checking services"));
+            Assert(delivered[2].Contains("Task complete"));
+        }
+        Assert(worker.ExecuteTask?.IsCompleted == false);
+    }
+    finally { await worker.StopAsync(default); }
+    Assert((await journal.SnapshotAsync(default)).Replies.All(r => !r.Text.Contains("Still working")));
+}
+
 sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> action) : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) => action(request, token);
@@ -249,6 +336,7 @@ sealed class Fixture : IDisposable
             ["BLOODRAVEN_STATE_DIRECTORY"] = Path.Combine(Root, "state"), ["BLOODRAVEN_CODEX_EXECUTABLE"] = fake,
             ["BLOODRAVEN_CODEX_SANDBOX"] = "workspace-write", ["BLOODRAVEN_TASK_TIMEOUT_SECONDS"] = "30",
             ["TEST_CODEX_MODE"] = "normal", ["TEST_PID_FILE"] = null,
+            ["BLOODRAVEN_PROGRESS_INTERVAL_SECONDS"] = null,
         };
         foreach (var (key, value) in values) { saved[key] = Environment.GetEnvironmentVariable(key); Environment.SetEnvironmentVariable(key, value); }
         Options = new AppOptions();
