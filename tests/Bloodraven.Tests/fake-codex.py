@@ -9,6 +9,11 @@ if "--version" in sys.argv or "login" in sys.argv:
     sys.exit(0)
 mode = os.environ.get("TEST_CODEX_MODE", "normal")
 prompt = sys.stdin.read()
+if mode == "progress":
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Checking services"}}), flush=True)
+    time.sleep(12)
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Task complete"}}), flush=True)
+    sys.exit(0)
 if mode in ("sleep", "malformed"):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     with open(os.environ["TEST_PID_FILE"], "w") as handle:
