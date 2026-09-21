@@ -124,9 +124,9 @@ public static class AppServerRunner
             await Request("initialize", new { clientInfo = new { name = "bloodraven", version = "0.2.0" } });
             await Write(new { method = "initialized", @params = new { } });
             var saved = await sessions.GetAsync(token, conversation, approved: true);
-            var thread = await Request(saved is null ? "thread/start" : "thread/resume", new {
-                threadId = saved, cwd = options.WorkingDirectory, approvalPolicy = "unlessTrusted", sandbox = "readOnly"
-            });
+            var thread = saved is null
+                ? await Request("thread/start", new { cwd = options.WorkingDirectory, approvalPolicy = "unlessTrusted", sandbox = "readOnly" })
+                : await Request("thread/resume", new { threadId = saved, cwd = options.WorkingDirectory, approvalPolicy = "unlessTrusted", sandbox = "readOnly" });
             var threadId = thread.GetProperty("thread").GetProperty("id").GetString()!;
             await sessions.SetAsync(threadId, token, conversation, approved: true);
             var input = new List<object> { new { type = "text", text = prompt } };
