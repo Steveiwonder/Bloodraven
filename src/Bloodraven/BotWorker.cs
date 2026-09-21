@@ -82,7 +82,14 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         var text = $"Bloodraven {Version}\nStatus: {(codex.IsRunning ? "working" : "idle")}\nConversation: {state.ActiveConversation}\nSession: {session ?? "none"}\nRunning: {(running is null ? "none" : $"{running.Id} ({running.Conversation})")}\nWaiting: {state.Jobs.Count(j => !j.Running)}\nPending replies: {state.Replies.Count}\nApproval requests: {approvals.Count}";
         if (health)
         {
-            text += $"\nRepository: {options.WorkingDirectory}\nCodex: startup executable and login checks passed\nLast successful poll: {lastPoll:O}\nApprovals: {((state.Approvals ?? options.ApprovalDefault) ? "on" : "off")}\nSchedules: {state.Schedules.Count(s => !s.Paused)} enabled\nRecent failures:";
+            string availability;
+            using var check = CancellationTokenSource.CreateLinkedTokenSource(token);
+            check.CancelAfter(TimeSpan.FromSeconds(5));
+            try { await Preflight.CheckAsync(options, check.Token); availability = "repository, executable and login checks passed now"; }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { availability = "health check timed out after 5 seconds"; }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception) { availability = "check failed; inspect the local Codex login and repository permissions"; }
+            text += $"\nRepository: {options.WorkingDirectory}\nCodex: {availability}\nLast successful poll: {lastPoll:O}\nApprovals: {((state.Approvals ?? options.ApprovalDefault) ? "on" : "off")}\nSchedules: {state.Schedules.Count(s => !s.Paused)} enabled\nRecent failures:";
             var failures = state.Outcomes.Where(o => o.Status != "Completed").TakeLast(5).ToArray();
             text += failures.Length == 0 ? " none" : "\n" + string.Join('\n', failures.Select(o => $"{o.Finished:yyyy-MM-dd HH:mm} UTC · {o.Conversation} · {o.Status}"));
         }
