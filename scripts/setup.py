@@ -99,6 +99,7 @@ def config(pairing, directory, codex, sandbox, output):
         "BLOODRAVEN_CODEX_EXECUTABLE": codex,
         "BLOODRAVEN_CODEX_SANDBOX": sandbox,
         "BLOODRAVEN_PROGRESS_INTERVAL_SECONDS": prompt_progress("30"),
+        "BLOODRAVEN_APPROVALS": prompt_approvals(),
     }
     write_private(output, "".join(f"{key}={env_quote(value)}\n" for key, value in values.items()))
 
@@ -149,6 +150,14 @@ def progress_config(path):
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def prompt_approvals():
+    while True:
+        value = input("Require Telegram approval for Codex operations needing approval (on/off) [off]: ").strip().lower() or "off"
+        if value in ("on", "off"):
+            return value
+        print("Enter on or off.")
 
 
 def resolve_directory(value, invocation):
