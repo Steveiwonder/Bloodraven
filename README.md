@@ -139,13 +139,13 @@ New releases are staged under `/opt/bloodraven/releases/` before the old service
 
 ### Progress during long tasks
 
-While Codex works, Bloodraven sends a short update every 30 seconds by default, showing elapsed time and the latest available Codex message or command/file/tool activity. When there is nothing new, it sends “Still working…” with the elapsed time. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress.
+While Codex works, Bloodraven sends a short update every 30 seconds by default, showing elapsed time and command/file/tool activity. When there is nothing new, it sends “Still working…” with the elapsed time. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress.
 
 Installation and interactive upgrades ask for the interval in seconds: **10–3600**, or **0** to disable updates. Press Enter to keep the displayed value. Existing installations without the setting use **30 seconds**. Non-interactive upgrades preserve settings without prompting.
 
 To change it later, run `sudo nano /etc/bloodraven/bloodraven.env`, set `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"` (for example), save, then run `sudo systemctl restart bloodraven`.
 
-Updates contain short Codex message excerpts and general activity descriptions. Raw command output, stderr, tool payloads, and reasoning events are not forwarded. Progress stops when the task finishes, fails, or is cancelled. Updates are skipped during delivery problems instead of being saved for later; the final answer still uses the persistent reply queue. Telegram delivery and rate limits can delay updates, so the interval is not an exact delivery guarantee.
+Updates contain general activity descriptions. Codex message text is reserved for the final reply, so an answer arriving before process exit is not repeated as progress. Raw command output, stderr, tool payloads, and reasoning events are not forwarded. Progress stops when the task finishes, fails, or is cancelled. Updates are skipped during delivery problems instead of being saved for later; the final answer still uses the persistent reply queue. Telegram delivery and rate limits can delay updates, so the interval is not an exact delivery guarantee.
 
 ### Restart and delivery behaviour
 

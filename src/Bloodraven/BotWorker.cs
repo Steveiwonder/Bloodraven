@@ -26,7 +26,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
 
     async Task<string> RunWithProgressAsync(Job job, CancellationToken token)
     {
-        var progress = new TaskProgress(options.TelegramBotToken);
+        var progress = new TaskProgress();
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         var reporting = progress.RunAsync(TimeSpan.FromSeconds(options.ProgressIntervalSeconds), async (text, ct) =>
         {
