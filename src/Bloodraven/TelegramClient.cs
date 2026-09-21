@@ -14,6 +14,11 @@ public sealed class TelegramException(int status, int retryAfter = 5, bool forma
 
 public sealed class TelegramClient(HttpClient http, AppOptions options)
 {
+    // Telegram distinguishes an absent optional field from JSON null. In
+    // particular, reply_markup must be an object whenever it is present.
+    static readonly JsonSerializerOptions RequestJson = new(JsonSerializerDefaults.Web) {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
     public async Task CheckAsync(CancellationToken token) => await CallAsync<JsonElement>("getMe", new { }, token);
     public async Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(long offset, CancellationToken token) =>
         await CallAsync<List<TelegramUpdate>>("getUpdates", new { offset, timeout = 30, limit = 20, allowed_updates = new[] { "message", "callback_query" } }, token) ?? [];
@@ -90,7 +95,7 @@ public sealed class TelegramClient(HttpClient http, AppOptions options)
     {
         try
         {
-            using var response = await http.PostAsJsonAsync($"https://api.telegram.org/bot{options.TelegramBotToken}/{method}", body, token);
+            using var response = await http.PostAsJsonAsync($"https://api.telegram.org/bot{options.TelegramBotToken}/{method}", body, RequestJson, token);
             var envelope = await response.Content.ReadFromJsonAsync<TelegramEnvelope<T>>(cancellationToken: token);
             if (!response.IsSuccessStatusCode || envelope?.Ok != true)
             {

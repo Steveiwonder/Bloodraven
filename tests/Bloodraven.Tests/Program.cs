@@ -23,6 +23,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Codex parser failure kills process tree", Malformed),
     ("Codex oversized output and stderr failures are bounded and sanitised", RunnerFailures),
     ("Telegram HTML rejection falls back to plain text", HtmlFallback),
+    ("Telegram payloads omit absent fields and preserve keyboards and edits", TelegramPayloads),
     ("Telegram rate limits and network exceptions are sanitised", TelegramErrors),
     ("worker survives delivery outage and executes work once", WorkerOutage),
     ("progress is bounded, selective, and stops on cancellation", Progress),
@@ -188,12 +189,45 @@ static async Task HtmlFallback()
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         bodies.Add(await request.Content!.ReadAsStringAsync(token));
+        using var parsed = JsonDocument.Parse(bodies[^1]);
+        Assert(!parsed.RootElement.TryGetProperty("reply_markup", out _));
+        Assert(!parsed.RootElement.TryGetProperty("message_id", out _));
         return bodies.Count == 1 ? Response(400, "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: can't parse entities\"}")
             : Response(200, "{\"ok\":true,\"result\":{}}");
     }));
     await new TelegramClient(http, fixture.Options).SendAsync(123, new FormattedMessage("<b>hi</b>", "hi"), default);
     Assert(bodies[0].Contains("parse_mode") && !bodies[1].Contains("parse_mode"));
 }
+static async Task TelegramPayloads()
+{
+    using var fixture = new Fixture();
+    var bodies = new List<JsonElement>();
+    using var http = new HttpClient(new Handler(async (request, token) =>
+    {
+        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        var root = body.RootElement;
+        // Match Telegram's parser: JSON null is not an absent keyboard.
+        if (root.TryGetProperty("reply_markup", out var markup) && markup.ValueKind != JsonValueKind.Object)
+            return Response(400, "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: object expected as reply markup\"}");
+        if (request.RequestUri!.AbsolutePath.EndsWith("sendMessage"))
+            Assert(!root.TryGetProperty("message_id", out _), "New messages must omit the edit-only message ID");
+        bodies.Add(root.Clone());
+        return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
+    }));
+    var telegram = new TelegramClient(http, fixture.Options);
+    var message = new FormattedMessage("Hello", "Hello");
+    Assert(await telegram.SendAsync(123, message, default) == 42);
+    InlineButton[][] buttons = [[new("Next", "front:1")]];
+    await telegram.SendAsync(123, message, default, buttons);
+    await telegram.SendAsync(123, message, default, editMessageId: 42);
+    await telegram.SendAsync(123, message, default, buttons, 42);
+    Assert(bodies.Count == 4 && !bodies[0].TryGetProperty("reply_markup", out _));
+    Assert(bodies[1].GetProperty("reply_markup").GetProperty("inline_keyboard")[0][0].GetProperty("callback_data").GetString() == "front:1");
+    Assert(bodies[2].GetProperty("message_id").GetInt64() == 42);
+    Assert(bodies[2].GetProperty("reply_markup").GetProperty("inline_keyboard").GetArrayLength() == 0, "Edits must still clear stale buttons");
+    Assert(bodies[3].GetProperty("reply_markup").GetProperty("inline_keyboard").GetArrayLength() == 1);
+}
+
 static async Task TelegramErrors()
 {
     using var fixture = new Fixture();
@@ -409,7 +443,7 @@ static async Task WorkerControls()
         var state = await journal.SnapshotAsync(default);
         Assert(state.Offset == 4 && state.ActiveConversation == "homelab" && !state.Conversations.Contains("hijack"));
         Assert(state.Jobs.Count == 0);
-        lock (replies) Assert(replies.Any(r => r.Contains("Bloodraven 0.2.0") && r.Contains("Repository:") && r.Contains("Recent failures")));
+        lock (replies) Assert(replies.Any(r => r.Contains("Bloodraven " + BotWorker.Version) && r.Contains("Repository:") && r.Contains("Recent failures")));
         Assert(worker.ExecuteTask?.IsCompleted == false);
     }
     finally { await worker.StopAsync(default); }

@@ -185,6 +185,10 @@ The upgrader installs the .NET 10 SDK if necessary, downloads and builds the lat
 
 New releases are staged under `/opt/bloodraven/releases/` before the old service is stopped. The service validates its repository, Codex login and Telegram token under the real service account, then the upgrader waits for successful polling. If activation fails, it attempts to restore and restart the previous service. Old releases and service backups are retained for recovery rather than automatically deleted. The original flat `/opt/bloodraven` installation is supported as a rollback target.
 
+### Telegram replies stuck with HTTP 400 after upgrading to 0.2.0
+
+Upgrade again using the command above to install **0.2.1 or later**. Version 0.2.0 sent a null optional keyboard field on ordinary replies, which Telegram rejected. Version 0.2.1 omits absent fields and retries the existing reply queue correctly. Do not delete `journal.json` or re-pair the bot: queued replies are retained for delivery. After upgrading, `/health` shows the installed version.
+
 ### Progress during long tasks
 
 While Codex works, Bloodraven edits its single working message every 30 seconds by default, showing elapsed time, completed/running command counts, up to two running commands and how long they have been observed, recent command completions with exit codes, and short excerpts of newly reported command output. Only the latest three details are retained per interval. When nothing new is reported, the update says so. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress. Output is available only when Codex emits it, which may be after a command finishes. Counts cover up to 1,024 command IDs per task; an update labels that limit if reached.
