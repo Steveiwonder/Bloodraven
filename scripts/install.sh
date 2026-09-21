@@ -18,7 +18,8 @@ if ! codex login status >/dev/null 2>&1; then
   exit 1
 fi
 
-read -r -p "Telegram bot token (from @BotFather): " bot_token
+read -r -s -p "Telegram bot token (from @BotFather): " bot_token
+echo
 bot_name="$(curl --fail --silent "https://api.telegram.org/bot${bot_token}/getMe" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"]; print(d["result"]["username"])')"
 echo "Open Telegram, send /start to @${bot_name}, then press Enter."
 read -r
@@ -29,13 +30,18 @@ identity="$(curl --fail --silent "https://api.telegram.org/bot${bot_token}/getUp
 }
 read -r user_id chat_id <<<"${identity}"
 
-default_working_directory="${PWD}"
+default_working_directory="${BLOODRAVEN_DEFAULT_WORKING_DIRECTORY:-${PWD}}"
 read -r -p "Git repository Codex should work in [${default_working_directory}]: " working_directory
 working_directory="${working_directory:-${default_working_directory}}"
+mkdir -p "${working_directory}"
 working_directory="$(realpath "${working_directory}")"
 if [[ ! -d "${working_directory}/.git" ]]; then
-  echo "That directory is not a Git repository."
-  exit 1
+  read -r -p "No Git repository exists at ${working_directory}. Create one there? [y/N]: " create_repository
+  if [[ "${create_repository,,}" != "y" && "${create_repository,,}" != "yes" ]]; then
+    echo "Setup stopped without changing that directory. Run the installer again from your repository or enter its path when prompted."
+    exit 1
+  fi
+  git -C "${working_directory}" init
 fi
 
 read -r -p "Codex sandbox (read-only/workspace-write/danger-full-access) [workspace-write]: " sandbox
@@ -72,4 +78,9 @@ sudo install -m 0600 "${temp_env}" "${config_root}/bloodraven.env"
 sed -e "s|@@USER@@|${service_user}|g" -e "s|@@GROUP@@|${service_group}|g" -e "s|@@HOME@@|${user_home}|g" -e "s|@@DOTNET@@|${dotnet_path}|g" deploy/bloodraven.service | sudo tee /etc/systemd/system/bloodraven.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now bloodraven
+if ! sudo systemctl is-active --quiet bloodraven; then
+  echo "Bloodraven did not start successfully. Recent logs:"
+  sudo journalctl -u bloodraven -n 50 --no-pager
+  exit 1
+fi
 echo "Bloodraven is installed. Check it with: sudo systemctl status bloodraven"
