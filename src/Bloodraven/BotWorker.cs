@@ -244,6 +244,12 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (OperationCanceledException) { outcome = "Cancelled or timed out"; result = "Task cancelled or timed out. It may have made changes; review them before retrying."; }
+            catch (AppServerException ex)
+            {
+                logger.LogWarning("Approval mode failed at {Stage}: {Reason} (RPC {Code}).", ex.Stage, ex.Reason, ex.RpcCode);
+                outcome = "Failed";
+                result = ex.Message + "\nApproval mode remains enforced. Check the installed Codex version and service logs; no unrestricted retry was made.";
+            }
             catch (ArgumentException ex) { outcome = "Failed"; result = ex.Message; }
             catch (Exception ex) when (ex is not FatalRunnerException)
             {

@@ -3,6 +3,15 @@ using System.Text.Json;
 
 namespace Bloodraven;
 
+// Only locally controlled stage/reason labels and numeric RPC codes are exposed.
+public sealed class AppServerException(string stage, string reason, int? rpcCode = null)
+    : Exception($"Approval mode failed during {stage}: {reason}" + (rpcCode is null ? "." : $" (RPC {rpcCode})."))
+{
+    public string Stage { get; } = stage;
+    public string Reason { get; } = reason;
+    public int? RpcCode { get; } = rpcCode;
+}
+
 // Approval mode never falls back to exec: unsupported protocols fail closed.
 public static class AppServerRunner
 {
@@ -96,7 +105,7 @@ public static class AppServerRunner
             if (name == "turn/completed")
             {
                 var status = p.GetProperty("turn").GetProperty("status").GetString();
-                if (status != "completed") throw new InvalidOperationException("Codex turn did not complete successfully.");
+                if (status != "completed") throw new AppServerException("turn/completed", "Codex did not complete the turn; review any changes before retrying");
                 finished = true;
             }
         }
@@ -111,13 +120,19 @@ public static class AppServerRunner
                 if (!root.TryGetProperty("method", out _) && root.TryGetProperty("id", out var responseId) &&
                     responseId.ValueKind == JsonValueKind.Number && responseId.GetInt32() == id)
                 {
-                    if (root.TryGetProperty("error", out _)) throw new InvalidOperationException("Codex app-server rejected the request. Check the installed Codex version and local configuration.");
+                    if (root.TryGetProperty("error", out var error))
+                    {
+                        int? code = error.TryGetProperty("code", out var codeValue) && codeValue.TryGetInt32(out var number) ? number : null;
+                        throw new AppServerException(method, code is -32600 or -32601 or -32602
+                            ? "Codex rejected the protocol request; check CLI compatibility"
+                            : "Codex rejected the request; check local authentication and configuration", code);
+                    }
                     return root.GetProperty("result").Clone();
                 }
                 await Handle(root);
             }
             token.ThrowIfCancellationRequested();
-            throw new InvalidOperationException("Codex app-server disconnected.");
+            throw new AppServerException(method, "Codex app-server disconnected");
         }
         try
         {
@@ -125,18 +140,18 @@ public static class AppServerRunner
             await Write(new { method = "initialized", @params = new { } });
             var saved = await sessions.GetAsync(token, conversation, approved: true);
             var thread = saved is null
-                ? await Request("thread/start", new { cwd = options.WorkingDirectory, approvalPolicy = "unlessTrusted", sandbox = "readOnly" })
-                : await Request("thread/resume", new { threadId = saved, cwd = options.WorkingDirectory, approvalPolicy = "unlessTrusted", sandbox = "readOnly" });
+                ? await Request("thread/start", new { cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" })
+                : await Request("thread/resume", new { threadId = saved, cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" });
             var threadId = thread.GetProperty("thread").GetProperty("id").GetString()!;
             await sessions.SetAsync(threadId, token, conversation, approved: true);
-            var input = new List<object> { new { type = "text", text = prompt } };
+            var input = new List<object> { new { type = "text", text = prompt, text_elements = Array.Empty<object>() } };
             input.AddRange(images.Select(path => (object)new { type = "localImage", path }));
             await Request("turn/start", new { threadId, input, cwd = options.WorkingDirectory,
-                approvalPolicy = "unlessTrusted", sandboxPolicy = new { type = "readOnly" } });
+                approvalPolicy = "untrusted", sandboxPolicy = new { type = "readOnly", networkAccess = false } });
             while (!finished && await lines.MoveNextAsync())
             { using var json = JsonDocument.Parse(lines.Current); await Handle(json.RootElement); }
             token.ThrowIfCancellationRequested();
-            if (!finished) throw new InvalidOperationException("Codex disconnected before turn completion.");
+            if (!finished) throw new AppServerException("turn/completed", "Codex disconnected before turn completion");
             return final ?? "Codex finished without a final message.";
         }
         finally
