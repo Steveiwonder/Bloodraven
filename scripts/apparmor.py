@@ -60,7 +60,7 @@ def native_codex(launcher, machine=None):
 def profile_text(binary):
     path = str(binary)
     # AppArmor paths have their own glob/macro language. Reject its metacharacters.
-    if not path.startswith('/') or re.search(r'[\x00-\x1f\x7f"\\*?\[\]{}@]', path):
+    if not path.startswith('/') or re.search(r'[\x00-\x1f\x7f"\\*?\[\]{}]', path):
         raise ValueError('Codex path contains unsupported AppArmor metacharacters.')
     return (MARKER + 'abi <abi/4.0>,\ninclude <tunables/global>\n'
             + f'profile bloodraven-codex "{path}" flags=(unconfined) {{\n  userns,\n}}\n')
