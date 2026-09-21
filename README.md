@@ -13,7 +13,10 @@ Bloodraven is a small, self-hosted Telegram interface for the OpenAI Codex CLI. 
 - Saves the exact Codex session ID and resumes it on later messages
 - Persists queued messages and replies across restarts, running one Codex task at a time
 - Converts common Markdown formatting to Telegram HTML automatically
-- Supports `/new`, `/status`, `/cancel`, and `/help`
+- Keeps named Codex conversations, a controllable queue, and durable recurring schedules
+- Accepts photos/documents and returns repository files on request
+- Edits one progress message per task and sends the complete final answer separately
+- Offers native Codex approval buttons and `/health` diagnostics
 - Runs as a hardened systemd service
 
 Bloodraven stores no personal configuration in Git. Its installer writes secrets to `/etc/bloodraven/bloodraven.env` with mode `0600` and conversation state to `/var/lib/bloodraven`.
@@ -61,6 +64,7 @@ You do not need a webhook, public IP address, domain name, or open firewall port
 4. Confirm the displayed working repository by pressing Enter, or type a different path. If the selected directory is not already a Git repository, setup asks before initialising one.
 5. Choose a Codex sandbox. Press Enter to accept the safer `workspace-write` default.
 6. Choose how often Telegram should receive progress updates. Press Enter for **30 seconds**, enter **10–3600** seconds, or enter **0** to turn them off.
+7. Choose whether to enable approval buttons. Press Enter for **off**, which preserves the usual sandbox behaviour, or enter **on** for the approval mode explained below.
 
 The installer builds Bloodraven, stores its private settings outside the Git repository, installs a systemd service, and starts it automatically.
 
@@ -76,7 +80,7 @@ Open your bot in Telegram and send:
 Tell me which repository you are working in and list its files.
 ```
 
-The bot should reply `Queued.`, then `Working…`, followed by Codex's answer. You can check the service on Ubuntu with:
+The bot should acknowledge the conversation, show `Working…`, and then send Codex's answer. The working message is edited in place as the task progresses. You can check the service on Ubuntu with:
 
 ```bash
 sudo systemctl status bloodraven
@@ -106,12 +110,56 @@ bash bloodraven-install.sh
 
 | Command | Action |
 |---|---|
-| `/new` | Forget the saved Codex session and start fresh on the next message |
-| `/status` | Show idle/working state, session ID, and queue depth |
-| `/cancel` | Cancel the running Codex process |
+| `/conversation homelab` | Create or switch to a named conversation |
+| `/conversations` | List conversations with switch buttons |
+| `/new` | Reset the selected conversation when this command reaches the queue |
+| `/status` | Show the active conversation, session, running task and queue depth |
+| `/health` | Show Bloodraven version, repository, live Codex/login check, polling, schedules and recent failures |
+| `/queue` | Show tasks with **Move to next** and **Remove** buttons |
+| `/front ID` / `/remove ID` | Move a pending task to next, or remove it |
+| `/clear` | Remove pending tasks; keep the running task and schedules |
+| `/cancel` | Cancel the running Codex task, including an approval wait |
+| `/schedule` | Show scheduling examples and controls |
+| `/approvals on` / `/approvals off` | Enable or disable native approval mode for new tasks |
+| `/file reports/summary.md` | Send a file from the configured repository as a Telegram document |
 | `/help` | Show available commands |
 
-All other text is passed to the current Codex conversation as prompt data, not executable CLI arguments. Native interactive Codex slash commands are not implemented.
+Ordinary text goes to Codex as prompt data, never as CLI arguments. Unknown slash commands are rejected with help; native interactive Codex slash commands are not implemented.
+
+### Named conversations
+
+Send `/conversation homelab`, then your request. Use `/conversation research` for another history, and `/conversations` to switch back. Conversation names use 1–32 lowercase letters, digits, underscores or hyphens; up to 30 are supported. Your existing conversation becomes **default** automatically.
+
+All conversations use the working repository chosen during installation, including its `AGENTS.md` instructions. One task runs at a time. Each task remembers the conversation selected when it was queued; switching conversations never redirects waiting work. `/new` resets only that conversation and follows queue order.
+
+### Photos and documents
+
+Send a photo or attach a file with a caption describing what you want. Supported documents: `.txt`, `.log`, `.md`, `.json`, `.yaml`, `.yml`, `.csv`, `.xml`, `.pdf`, `.png`, `.jpg`, `.jpeg` and `.webp`. Each attachment is limited to **10 MiB**. Photos/images are passed to Codex as images; other documents are downloaded to a private local file and its path is included in the prompt. Reading a PDF may require tools available on your host. Albums arrive as separate tasks.
+
+To retrieve a generated file, send `/file path/relative/to/repository`. Bloodraven snapshots it before delivery. Files must be at most 10 MiB and inside the selected repository; absolute paths, `..`, `.git`, and symlinks are rejected. Files are only uploaded when you request them. Downloaded attachments are removed after the task; pending outgoing documents survive restarts and are removed after delivery. Telegram itself retains the copies you send or receive.
+
+### Recurring tasks
+
+Examples:
+
+```text
+/schedule add every 30m | Check container health and report any problems
+/schedule add daily 08:00 Europe/London | Summarise the overnight logs
+/schedule add weekly sat 08:00 Europe/London | Check for available updates; do not install them
+/schedule list
+```
+
+Intervals accept `m`, `h`, or `d`, from one minute to one year. Daily and weekly times use the timezone you supply; weekly days are `mon` through `sun`. The list includes pause/resume/delete buttons, or use `/schedule pause ID`, `/schedule resume ID`, and `/schedule delete ID`. Up to 20 schedules are supported.
+
+Schedules remember their conversation and survive service restarts. Due tasks join the normal queue and use the current approval setting. A schedule cannot overlap itself. After downtime, missed occurrences become at most one queued run per schedule, rather than a burst of old work. Spring-forward times that do not exist are skipped; a repeated autumn time runs once. Pausing/deleting removes that schedule's pending tasks but does not cancel one already running. Resuming calculates the next future occurrence.
+
+### Approval buttons
+
+Send `/approvals on` to enable this optional mode. Bloodraven starts **Codex app-server** with `unlessTrusted` approval policy and a **read-only sandbox**, and forwards native command/file approval requests to your authorised private chat. The operation stays blocked until you choose **Approve once** or **Decline**. Requests expire after five minutes; cancellation or a service restart invalidates them. Requests that cannot be displayed completely, or unsupported permission requests, are declined. There is no fallback to unrestricted execution if the protocol is unsupported.
+
+This is Codex's native approval boundary, not a filter that guesses whether every operation is dangerous. Trusted read-only commands may run without asking. Existing Codex execution rules and external MCP tools affect what Codex asks to approve; external tools can have permissions outside the command sandbox. Review those tools and rules before relying on approval mode for sensitive administration. The service's systemd restrictions still apply after approval.
+
+Approval mode uses a separate session history for each conversation. Turning it on also upgrades pending tasks to require this mode; turning it off applies only to newly queued tasks. Running work keeps the policy it started with. `/approvals` shows the setting, which is saved across restarts. Existing installations keep approvals off unless explicitly enabled; upgrades do not introduce another prompt. The installation environment default is `BLOODRAVEN_APPROVALS="off"`; a saved `/approvals` choice takes precedence.
 
 Replies support **bold**, italics, strikethrough, inline code, fenced code, headings, HTTP(S) links, and bullet lists through a conservative Markdown-to-HTML formatter. Unsupported or unmatched syntax remains readable text. Raw HTML is escaped, links do not generate previews, and each long-message chunk has complete formatting tags without splitting emoji. If Telegram rejects HTML parsing, the affected chunk is sent as plain text. This is not a full CommonMark renderer; complex nesting and tables may remain plain text.
 
@@ -133,19 +181,19 @@ Run this as the same Linux user that originally installed Bloodraven:
 (set -e; script=$(mktemp); trap 'rm -f -- "$script"' EXIT; curl -fsSL https://raw.githubusercontent.com/Steveiwonder/Bloodraven/master/upgrade.sh -o "$script"; bash "$script")
 ```
 
-The upgrader installs the .NET 10 SDK if necessary, downloads and builds the latest Bloodraven, refreshes its systemd service, and verifies that it starts. It preserves the Telegram configuration, authorised user/chat IDs, Codex working directory, saved Codex session, sandbox choice, and existing Codex authentication.
+The upgrader installs the .NET 10 SDK if necessary, downloads and builds the latest Bloodraven, refreshes its systemd service, and verifies that it starts. It preserves the Telegram configuration, authorised user/chat IDs, Codex working directory, saved Codex session, sandbox choice, and existing Codex authentication. Existing state is read automatically by 0.2; no re-pairing is needed. Use `/health` after upgrading to confirm the version. Before a manual downgrade, stop the service and back up `/var/lib/bloodraven`: older versions do not understand named jobs, schedules or approval policies and must not consume a 0.2 journal.
 
 New releases are staged under `/opt/bloodraven/releases/` before the old service is stopped. The service validates its repository, Codex login and Telegram token under the real service account, then the upgrader waits for successful polling. If activation fails, it attempts to restore and restart the previous service. Old releases and service backups are retained for recovery rather than automatically deleted. The original flat `/opt/bloodraven` installation is supported as a rollback target.
 
 ### Progress during long tasks
 
-While Codex works, Bloodraven sends a short update every 30 seconds by default, showing elapsed time, completed/running command counts, up to two running commands and how long they have been observed, recent command completions with exit codes, and short excerpts of newly reported command output. Only the latest three details are retained per interval. When nothing new is reported, the update says so. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress. Output is available only when Codex emits it, which may be after a command finishes. Counts cover up to 1,024 command IDs per task; an update labels that limit if reached.
+While Codex works, Bloodraven edits its single working message every 30 seconds by default, showing elapsed time, completed/running command counts, up to two running commands and how long they have been observed, recent command completions with exit codes, and short excerpts of newly reported command output. Only the latest three details are retained per interval. When nothing new is reported, the update says so. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress. Output is available only when Codex emits it, which may be after a command finishes. Counts cover up to 1,024 command IDs per task; an update labels that limit if reached.
 
 Installation asks for the interval in seconds: **10–3600**, or **0** to disable updates. Upgrades keep a saved value without asking again, including **0**. An interactive upgrade only prompts when the setting is missing; press Enter to accept **30 seconds**. Non-interactive upgrades preserve settings without prompting; when the setting is absent, the application defaults to **30 seconds**.
 
 To change it later, run `sudo nano /etc/bloodraven/bloodraven.env`, set `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"` (for example), save, then run `sudo systemctl restart bloodraven`.
 
-Command names and output excerpts are shown as code, with length limits and redaction of the bridge token, common credential assignments, authorization values, and private-key output. Redaction cannot recognise every possible secret; command output excerpts may contain other sensitive data. Set the interval to **0** to disable progress delivery. Codex message text is reserved for the final reply, so an answer arriving before process exit is not repeated as progress. Stderr, tool result payloads, and reasoning events are not forwarded. Progress stops when the task finishes, fails, or is cancelled. Updates are skipped during delivery problems instead of being saved for later; the final answer still uses the persistent reply queue. Telegram delivery and rate limits can delay updates, so the interval is not an exact delivery guarantee.
+Command names and output excerpts are shown as code, with length limits and redaction of the bridge token, common credential assignments, authorization values, and private-key output. Redaction cannot recognise every possible secret; command output excerpts may contain other sensitive data. Set the interval to **0** to disable progress delivery. Codex message text is reserved for the final reply, so an answer arriving before process exit is not repeated as progress. Stderr, tool result payloads, and reasoning events are not forwarded. Progress stops when the task finishes, fails, or is cancelled. The working message becomes a short completion status; the complete final Codex answer is sent separately and split into readable chunks when necessary. Deleting the progress message does not prevent delivery of the final answer. Updates are skipped during delivery problems instead of being saved for later; the final answer still uses the persistent reply queue. Telegram delivery and rate limits can delay updates, so the interval is not an exact delivery guarantee.
 
 ### Restart and delivery behaviour
 
@@ -169,12 +217,13 @@ Command names and output excerpts are shown as code, with length limits and reda
 | `BLOODRAVEN_CODEX_SANDBOX` | no | `workspace-write` | `read-only`, `workspace-write`, or `danger-full-access` |
 | `BLOODRAVEN_TASK_TIMEOUT_SECONDS` | no | `3600` | Task time limit, 30–86400 seconds |
 | `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS` | no | `30` | Progress interval, 10–3600 seconds; `0` disables updates |
+| `BLOODRAVEN_APPROVALS` | no | `off` | Default native approval mode; saved `/approvals` choice takes precedence |
 
 Only private chats are accepted. If the optional chat ID is set, it must be a valid positive integer; malformed configuration fails startup rather than removing the restriction.
 
 ## Scope
 
-The first release supports Ubuntu, one bot owner, plain-text messages, and one conversation queue. Attachments, multiple users, streaming progress, Docker, and other chat platforms are intentionally left for later releases.
+Bloodraven 0.2 supports Ubuntu, one authorised bot owner, named conversations sharing one task queue, photos/documents, recurring schedules and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
 
 ## Development
 

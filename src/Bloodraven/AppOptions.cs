@@ -13,6 +13,12 @@ public sealed class AppOptions
     public string Sandbox { get; } = ValidateSandbox(Environment.GetEnvironmentVariable("BLOODRAVEN_CODEX_SANDBOX") ?? "workspace-write");
     public int TaskTimeoutSeconds { get; } = Timeout();
     public int ProgressIntervalSeconds { get; } = ProgressInterval();
+    public bool ApprovalDefault { get; } = ApprovalSetting();
+    static bool ApprovalSetting() => Environment.GetEnvironmentVariable("BLOODRAVEN_APPROVALS") switch
+    {
+        null or "off" => false, "on" => true,
+        _ => throw new InvalidOperationException("BLOODRAVEN_APPROVALS must be on or off.")
+    };
 
     static int ProgressInterval()
     {

@@ -8,6 +8,43 @@ import time
 if "--version" in sys.argv or "login" in sys.argv:
     sys.exit(0)
 mode = os.environ.get("TEST_CODEX_MODE", "normal")
+if "app-server" in sys.argv:
+    def send(value):
+        print(json.dumps(value), flush=True)
+    for line in sys.stdin:
+        message = json.loads(line)
+        method = message.get("method")
+        params = message.get("params", {})
+        if method == "initialized":
+            continue
+        if method == "initialize":
+            send({"id": message["id"], "result": {}})
+        elif method in ("thread/start", "thread/resume"):
+            assert params["sandbox"] == "readOnly" and params["approvalPolicy"] == "unlessTrusted"
+            send({"id": message["id"], "result": {"thread": {"id": "thr_test"}}})
+        elif method == "turn/start":
+            assert params["sandboxPolicy"]["type"] == "readOnly"
+            assert params["approvalPolicy"] == "unlessTrusted"
+            send({"id": message["id"], "result": {"turn": {"id": "turn_test"}}})
+            if mode == "unsupported":
+                send({"id": "approval", "method": "unknown/request", "params": {}})
+            elif mode == "fileapproval":
+                send({"method": "item/started", "params": {"item": {"type": "fileChange", "id": "item_test", "changes": [{"path": "example.txt", "diff": "+hello"}]}}})
+                send({"id": "approval", "method": "item/fileChange/requestApproval", "params": {"itemId": "item_test"}})
+            else:
+                send({"id": "approval", "method": "item/commandExecution/requestApproval", "params": {"itemId": "item_test", "command": "touch approved.txt", "cwd": os.getcwd()}})
+        elif message.get("id") == "approval":
+            if mode == "unsupported":
+                assert "error" in message
+                decision = "decline"
+            else:
+                decision = message["result"]["decision"]
+            if decision == "accept":
+                with open("approved.txt", "w") as handle:
+                    handle.write("approved")
+            send({"method": "item/completed", "params": {"item": {"id": "answer", "type": "agentMessage", "phase": "final_answer", "text": decision}}})
+            send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+    sys.exit(0)
 prompt = sys.stdin.read()
 if mode == "progress":
     print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "id": "cmd1", "command": "docker inspect plex", "aggregated_output": "Container is healthy", "exit_code": 0}}), flush=True)

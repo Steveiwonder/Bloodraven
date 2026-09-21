@@ -7,6 +7,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("worker authenticates buttons and reports health", WorkerControls),
+    ("named conversations and queue controls preserve task identity", ConversationsAndQueue),
+    ("durable schedules coalesce missed runs and handle timezones", Schedules),
+    ("approval requests gate execution and fail closed", Approvals),
+    ("attachments validate limits and confine exports", Attachments),
     ("formatter bold, lists, escaping and code", Formatting),
     ("formatter links, limits, emoji and fallback text", FormattingLimits),
     ("configuration fails closed and private chat is required", Configuration),
@@ -324,13 +329,19 @@ static async Task WorkerProgress()
     using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
         await git.WaitForExitAsync();
     var delivered = new List<string>();
+    var methods = new List<string>();
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
         { await Task.Delay(50, token); return Response(200, "{\"ok\":true,\"result\":[]}"); }
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
-        lock (delivered) delivered.Add(body.RootElement.GetProperty("text").GetString()!);
-        return Response(200, "{\"ok\":true,\"result\":{}}");
+        lock (delivered)
+        {
+            delivered.Add(body.RootElement.GetProperty("text").GetString()!);
+            methods.Add(request.RequestUri.AbsolutePath.Split('/').Last());
+            if (methods[^1] == "editMessageText") Assert(body.RootElement.GetProperty("message_id").GetInt64() == 42);
+        }
+        return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
     var journal = new Journal(options);
     var sessions = new SessionStore(options);
@@ -348,16 +359,184 @@ static async Task WorkerProgress()
         }
         lock (delivered)
         {
-            Assert(delivered.Count == 3, string.Join(";", delivered));
+            Assert(methods.SequenceEqual(new[] { "sendMessage", "editMessageText", "editMessageText", "sendMessage" }));
+            Assert(delivered.Count == 4, string.Join(";", delivered));
             Assert(delivered[0].Contains("Working"));
             Assert(delivered[1].Contains("Still working") && delivered[1].Contains("A command finished"));
-            Assert(delivered[2].Contains("Task complete"));
+            Assert(delivered[2].Contains("Completed"));
+            Assert(delivered[3].Contains("Task complete"));
             Assert(delivered.Count(t => t.Contains("Task complete")) == 1, "Final answer delivered twice");
         }
         Assert(worker.ExecuteTask?.IsCompleted == false);
     }
     finally { await worker.StopAsync(default); }
     Assert((await journal.SnapshotAsync(default)).Replies.All(r => !r.Text.Contains("Still working")));
+}
+
+static async Task WorkerControls()
+{
+    using var fixture = new Fixture();
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+    var replies = new List<string>();
+    using var http = new HttpClient(new Handler(async (request, token) =>
+    {
+        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
+        {
+            await Task.Delay(20, token);
+            object Callback(int id, int user, string data) => new { update_id = id, callback_query = new { id = id.ToString(), from = new { id = user }, data,
+                message = new { from = new { id = 456 }, chat = new { id = 123, type = "private" }, text = "button", message_id = 70 } } };
+            object[] updates = body.RootElement.GetProperty("offset").GetInt64() == 0 ? [Callback(1, 999, "conv:hijack"), Callback(2, 123, "conv:homelab"),
+                new { update_id = 3, message = new { from = new { id = 123 }, chat = new { id = 123, type = "private" }, text = "/health" } }] : [];
+            return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
+        }
+        if (request.RequestUri.AbsolutePath.EndsWith("sendMessage"))
+            lock (replies) replies.Add(body.RootElement.GetProperty("text").GetString()!);
+        return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
+    }));
+    var journal = new Journal(fixture.Options);
+    var sessions = new SessionStore(fixture.Options);
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), new CodexRunner(fixture.Options, sessions),
+        sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+    await worker.StartAsync(default);
+    try
+    {
+        for (var i = 0; i < 200; i++)
+        {
+            lock (replies) { if (replies.Any(r => r.Contains("Recent failures"))) break; }
+            await Task.Delay(30);
+        }
+        var state = await journal.SnapshotAsync(default);
+        Assert(state.Offset == 4 && state.ActiveConversation == "homelab" && !state.Conversations.Contains("hijack"));
+        Assert(state.Jobs.Count == 0);
+        lock (replies) Assert(replies.Any(r => r.Contains("Bloodraven 0.2.0") && r.Contains("Repository:") && r.Contains("Recent failures")));
+        Assert(worker.ExecuteTask?.IsCompleted == false);
+    }
+    finally { await worker.StopAsync(default); }
+}
+
+static async Task ConversationsAndQueue()
+{
+    using var fixture = new Fixture();
+    var sessions = new SessionStore(fixture.Options);
+    await sessions.SetAsync("legacy-session", default);
+    await sessions.SetAsync("other-session", default, "homelab");
+    await sessions.SetAsync("approved-session", default, "homelab", true);
+    Assert(await sessions.GetAsync(default) == "legacy-session");
+    Assert(await sessions.GetAsync(default, "homelab") == "other-session");
+    Assert(await sessions.GetAsync(default, "homelab", true) == "approved-session");
+    await sessions.ClearAsync(default, "homelab");
+    Assert(await sessions.GetAsync(default, "homelab") is null && await sessions.GetAsync(default, "homelab", true) is null);
+    await Throws<InvalidDataException>(() => sessions.SetAsync("x", default, "../escape"));
+    var data = new JournalData();
+    data.Jobs.Add(new Job(1, 123, "running", true));
+    data.Jobs.Add(new Job(2, 123, "waiting"));
+    data.Jobs.Add(new Job(3, 123, "next"));
+    BotCommands.Apply(data, 123, "/conversation homelab", false);
+    Assert(data.ActiveConversation == "homelab" && data.Jobs.All(j => j.Conversation == "default"));
+    BotCommands.Apply(data, 123, "/front 3", false);
+    Assert(data.Jobs.Select(j => j.Id).SequenceEqual(new long[] { 1, 3, 2 }));
+    BotCommands.Apply(data, 123, "/remove 1", false);
+    Assert(data.Jobs.Count == 3, "Removed running work");
+    BotCommands.Apply(data, 123, "/approvals on", false);
+    BotCommands.Apply(data, 123, "/approvals off", false);
+    Assert(data.Jobs.Skip(1).All(j => j.ApprovalRequired), "Queued approval policy weakened");
+    BotCommands.Apply(data, 123, "/clear", false);
+    Assert(data.Jobs.Count == 1 && data.Jobs[0].Running);
+    var legacy = JsonSerializer.Deserialize<JournalData>("{\"Offset\":4,\"Jobs\":[{\"Id\":4,\"ChatId\":123,\"Text\":\"hello\"}],\"Replies\":[]}")!;
+    Assert(legacy.ActiveConversation == "default" && legacy.Jobs[0].Conversation == "default" && legacy.Schedules.Count == 0);
+}
+
+static Task Schedules()
+{
+    var now = DateTimeOffset.Parse("2026-09-21T12:00:00Z");
+    Assert(Scheduling.Next("every 30m", now) == now.AddMinutes(30));
+    Assert(Scheduling.Next("daily 08:00 Europe/London", now) == DateTimeOffset.Parse("2026-09-22T07:00:00Z"));
+    Assert(Scheduling.Next("weekly sat 08:00 UTC", now) == DateTimeOffset.Parse("2026-09-26T08:00:00Z"));
+    // A repeated local hour runs once; a nonexistent local time is skipped.
+    Assert(Scheduling.Next("daily 01:30 Europe/London", DateTimeOffset.Parse("2026-10-25T00:45:00Z")) == DateTimeOffset.Parse("2026-10-26T01:30:00Z"));
+    Assert(Scheduling.Next("daily 01:30 Europe/London", DateTimeOffset.Parse("2026-03-28T12:00:00Z")) == DateTimeOffset.Parse("2026-03-30T00:30:00Z"));
+    var data = new JournalData { Approvals = true };
+    data.Schedules.Add(new Schedule("s", 123, "check", "homelab", "every 30m", now.AddDays(-4)));
+    Scheduling.EnqueueDue(data, now, false);
+    Assert(data.Jobs.Count == 1 && data.Jobs[0].Conversation == "homelab" && data.Jobs[0].ApprovalRequired);
+    Assert(data.Schedules[0].NextRun == now.AddMinutes(30));
+    Scheduling.EnqueueDue(data, now.AddHours(2), false);
+    Assert(data.Jobs.Count == 1, "Schedule overlapped itself");
+    BotCommands.Apply(data, 123, "/schedule pause s", false);
+    Assert(data.Jobs.Count == 0 && data.Schedules[0].Paused);
+    var roundtrip = JsonSerializer.Deserialize<JournalData>(JsonSerializer.Serialize(data))!;
+    Assert(roundtrip.Schedules[0].Paused && roundtrip.NextScheduledId == -2);
+    return Task.CompletedTask;
+}
+
+static async Task Approvals()
+{
+    using var fixture = new Fixture();
+    var journal = new Journal(fixture.Options);
+    await journal.InitializeAsync(default);
+    var broker = new ApprovalBroker(journal);
+    var sessions = new SessionStore(fixture.Options);
+    var runner = new CodexRunner(fixture.Options, sessions);
+    using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    var run = runner.RunAsync("test", stop.Token, approve: (m, d, ct) => broker.RequestAsync(123, "default", m, d, ct));
+    JournalData state;
+    do { await Task.Delay(20); state = await journal.SnapshotAsync(default); } while (state.Replies.Count == 0 && !run.IsCompleted);
+    Assert(!run.IsCompleted && !File.Exists(Path.Combine(fixture.Root, "approved.txt")), "Command ran before approval");
+    var nonce = state.Replies[0].Buttons![0][0].Data.Split(':')[1];
+    Assert(!broker.Decide(nonce, 999, true), "Wrong chat could approve");
+    Assert(broker.Decide(nonce, 123, true));
+    Assert(!broker.Decide(nonce, 123, true), "Approval replay accepted");
+    Assert(await run == "accept" && File.Exists(Path.Combine(fixture.Root, "approved.txt")));
+    Assert(await sessions.GetAsync(default) is null && await sessions.GetAsync(default, approved: true) == "thr_test");
+    File.Delete(Path.Combine(fixture.Root, "approved.txt"));
+    Assert(await runner.RunAsync("decline", stop.Token, approve: (_, _, _) => Task.FromResult(false)) == "decline");
+    Assert(!File.Exists(Path.Combine(fixture.Root, "approved.txt")));
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "fileapproval");
+    var sawDiff = false;
+    await runner.RunAsync("file", stop.Token, approve: (_, d, _) => { sawDiff = d.GetProperty("proposal").GetProperty("changes")[0].GetProperty("diff").GetString() == "+hello"; return Task.FromResult(false); });
+    Assert(sawDiff, "File approval omitted the proposed patch");
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "unsupported");
+    Assert(await runner.RunAsync("unknown", stop.Token, approve: (_, _, _) => throw new Exception("Unknown request was approved")) == "decline");
+    Assert(!File.Exists(Path.Combine(fixture.Root, "approved.txt")));
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "normal");
+    using var cancelled = new CancellationTokenSource();
+    var blocked = runner.RunAsync("cancel approval", cancelled.Token, approve: (m, d, ct) => broker.RequestAsync(123, "default", m, d, ct));
+    for (var i = 0; i < 200 && broker.Count == 0; i++) await Task.Delay(10);
+    Assert(broker.Count == 1);
+    cancelled.Cancel();
+    await Throws<OperationCanceledException>(() => blocked);
+    Assert(broker.Count == 0 && !File.Exists(Path.Combine(fixture.Root, "approved.txt")));
+    Assert((await journal.SnapshotAsync(default)).Replies.All(r => r.Buttons is null));
+    using var oversized = JsonDocument.Parse(JsonSerializer.Serialize(new { command = new string('x', 3000) }));
+    Assert(!await broker.RequestAsync(123, "default", "command", oversized.RootElement, stop.Token));
+}
+
+static async Task Attachments()
+{
+    using var fixture = new Fixture();
+    var message = new TelegramMessage(new TelegramUser(123), new TelegramChat(123, "private"), null,
+        Document: new TelegramDocument("id", "report.txt", "text/plain", 10));
+    Assert(AttachmentStore.Read(message).Single().Name == "report.txt");
+    await Throws<ArgumentException>(() => { AttachmentStore.Read(message with { Document = message.Document! with { FileSize = TelegramClient.FileLimit + 1 } }); return Task.CompletedTask; });
+    await Throws<ArgumentException>(() => { AttachmentStore.Read(message with { Document = message.Document! with { FileName = "program.exe" } }); return Task.CompletedTask; });
+    await File.WriteAllTextAsync(Path.Combine(fixture.Root, "report.txt"), "test report");
+    Assert(AttachmentStore.ResolveExport(fixture.Root, "report.txt").EndsWith("report.txt"));
+    await Throws<ArgumentException>(() => { AttachmentStore.ResolveExport(fixture.Root, "../escape"); return Task.CompletedTask; });
+    File.CreateSymbolicLink(Path.Combine(fixture.Root, "link.txt"), Path.Combine(fixture.Root, "report.txt"));
+    await Throws<ArgumentException>(() => { AttachmentStore.ResolveExport(fixture.Root, "link.txt"); return Task.CompletedTask; });
+    using var http = new HttpClient(new Handler((request, _) => Task.FromResult(request.RequestUri!.AbsolutePath.Contains("getFile")
+        ? Response(200, "{\"ok\":true,\"result\":{\"file_path\":\"documents/file.txt\",\"file_size\":11}}")
+        : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("test report") })));
+    var store = new AttachmentStore(fixture.Options, new TelegramClient(http, fixture.Options));
+    var prepared = await store.PrepareAsync(new Job(1, 123, "inspect", Attachments: AttachmentStore.Read(message)), default);
+    Assert(prepared.Prompt.Contains("untrusted input") && prepared.Images.Length == 0);
+    using (var fifo = Process.Start(new ProcessStartInfo("mkfifo") { ArgumentList = { Path.Combine(fixture.Root, "pipe") } })!) await fifo.WaitForExitAsync();
+    await Throws<ArgumentException>(() => store.ExportAsync("pipe", default));
+    var exported = await store.ExportAsync("report.txt", default);
+    Assert(await File.ReadAllTextAsync(exported) == "test report");
+    store.Cleanup(1);
+    Assert(!Directory.Exists(Path.Combine(fixture.Options.StateDirectory, "attachments", "1")));
 }
 
 sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> action) : HttpMessageHandler
@@ -382,6 +561,7 @@ sealed class Fixture : IDisposable
             ["BLOODRAVEN_CODEX_SANDBOX"] = "workspace-write", ["BLOODRAVEN_TASK_TIMEOUT_SECONDS"] = "30",
             ["TEST_CODEX_MODE"] = "normal", ["TEST_PID_FILE"] = null,
             ["BLOODRAVEN_PROGRESS_INTERVAL_SECONDS"] = null,
+            ["BLOODRAVEN_APPROVALS"] = null,
         };
         foreach (var (key, value) in values) { saved[key] = Environment.GetEnvironmentVariable(key); Environment.SetEnvironmentVariable(key, value); }
         Options = new AppOptions();

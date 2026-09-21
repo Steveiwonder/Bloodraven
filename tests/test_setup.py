@@ -19,6 +19,12 @@ setup, deploy = module("setup"), module("deploy")
 
 
 class PairingTests(unittest.TestCase):
+    def test_optional_approval_prompt(self):
+        with patch('builtins.input', side_effect=['invalid', 'ON']):
+            self.assertEqual(setup.prompt_approvals(), 'on')
+        with patch('builtins.input', return_value=''):
+            self.assertEqual(setup.prompt_approvals(), 'off')
+
     def test_progress_validation(self):
         for value in ('0', '10', '30', '3600'):
             self.assertEqual(setup.validate_progress(value), value)
