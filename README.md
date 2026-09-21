@@ -139,13 +139,13 @@ New releases are staged under `/opt/bloodraven/releases/` before the old service
 
 ### Progress during long tasks
 
-While Codex works, Bloodraven sends a short update every 30 seconds by default, showing elapsed time and command/file/tool activity. When there is nothing new, it sends “Still working…” with the elapsed time. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress.
+While Codex works, Bloodraven sends a short update every 30 seconds by default, showing elapsed time, completed/running command counts, up to two running commands and how long they have been observed, recent command completions with exit codes, and short excerpts of newly reported command output. Only the latest three details are retained per interval. When nothing new is reported, the update says so. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress. Output is available only when Codex emits it, which may be after a command finishes. Counts cover up to 1,024 command IDs per task; an update labels that limit if reached.
 
 Installation asks for the interval in seconds: **10–3600**, or **0** to disable updates. Upgrades keep a saved value without asking again, including **0**. An interactive upgrade only prompts when the setting is missing; press Enter to accept **30 seconds**. Non-interactive upgrades preserve settings without prompting; when the setting is absent, the application defaults to **30 seconds**.
 
 To change it later, run `sudo nano /etc/bloodraven/bloodraven.env`, set `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"` (for example), save, then run `sudo systemctl restart bloodraven`.
 
-Updates contain general activity descriptions. Codex message text is reserved for the final reply, so an answer arriving before process exit is not repeated as progress. Raw command output, stderr, tool payloads, and reasoning events are not forwarded. Progress stops when the task finishes, fails, or is cancelled. Updates are skipped during delivery problems instead of being saved for later; the final answer still uses the persistent reply queue. Telegram delivery and rate limits can delay updates, so the interval is not an exact delivery guarantee.
+Command names and output excerpts are shown as code, with length limits and redaction of the bridge token, common credential assignments, authorization values, and private-key output. Redaction cannot recognise every possible secret; command output excerpts may contain other sensitive data. Set the interval to **0** to disable progress delivery. Codex message text is reserved for the final reply, so an answer arriving before process exit is not repeated as progress. Stderr, tool result payloads, and reasoning events are not forwarded. Progress stops when the task finishes, fails, or is cancelled. Updates are skipped during delivery problems instead of being saved for later; the final answer still uses the persistent reply queue. Telegram delivery and rate limits can delay updates, so the interval is not an exact delivery guarantee.
 
 ### Restart and delivery behaviour
 

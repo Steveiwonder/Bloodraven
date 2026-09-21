@@ -10,7 +10,7 @@ if "--version" in sys.argv or "login" in sys.argv:
 mode = os.environ.get("TEST_CODEX_MODE", "normal")
 prompt = sys.stdin.read()
 if mode == "progress":
-    print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "private command output"}}), flush=True)
+    print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "id": "cmd1", "command": "docker inspect plex", "aggregated_output": "Container is healthy", "exit_code": 0}}), flush=True)
     # Reproduce a final answer arriving before slow process shutdown. A progress
     # tick must occur during this delay without forwarding the answer early.
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Task complete"}}), flush=True)
