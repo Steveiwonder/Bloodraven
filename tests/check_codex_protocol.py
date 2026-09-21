@@ -47,7 +47,7 @@ def main(schema_directory, trace_file, executable):
 
     # Exercise initialization and thread creation against the real binary, with
     # a deliberately unreachable local provider. Never start a model turn.
-    with subprocess.Popen([executable, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    with subprocess.Popen([executable, "-c", 'model_reasoning_effort="high"', "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, text=True) as process:
         incoming = queue.Queue()
 
@@ -83,6 +83,7 @@ def main(schema_directory, trace_file, executable):
             })
             result = request(start)
             assert result["thread"]["id"], "Missing thread ID"
+            assert result["reasoningEffort"] == "high", "Reasoning config override was not applied"
             assert result["approvalPolicy"] == "untrusted", "Approval policy was not applied"
             assert result["sandbox"]["type"] == "readOnly", "Read-only sandbox was not applied"
             print("PASS real Codex initializes and creates an approval-mode thread without a model call", flush=True)
