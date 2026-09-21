@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 readonly REPOSITORY_URL="https://github.com/Steveiwonder/Bloodraven.git"
 readonly CODEX_INSTALLER_URL="https://chatgpt.com/codex/install.sh"
@@ -9,6 +10,7 @@ say() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 fail() { printf '\nBloodraven setup failed: %s\n' "$*" >&2; exit 1; }
 cleanup() {
   rm -f -- "${dotnet_installer:-}"
+  rm -f -- "${codex_installer:-}"
   if [[ -n "${checkout_directory:-}" && "${checkout_directory}" == "${TMPDIR:-/tmp}"/bloodraven.* ]]; then
     rm -rf -- "${checkout_directory}"
   fi
@@ -35,6 +37,10 @@ echo "You will be asked for your Telegram bot token and Codex working directory.
 command -v sudo >/dev/null 2>&1 || fail "sudo is required."
 sudo -v
 
+if [[ -f /etc/bloodraven/bloodraven.env ]]; then
+  fail "Bloodraven is already configured. Use the upgrade command in the README; your settings have not been changed."
+fi
+
 say "Installing Ubuntu prerequisites"
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git python3
@@ -51,7 +57,9 @@ fi
 
 if ! command -v codex >/dev/null 2>&1; then
   say "Installing Codex CLI"
-  curl -fsSL "${CODEX_INSTALLER_URL}" | sh
+  codex_installer="$(mktemp)"
+  curl -fsSL "${CODEX_INSTALLER_URL}" -o "${codex_installer}"
+  sh "${codex_installer}"
   export PATH="${HOME}/.local/bin:${HOME}/.codex/bin:${PATH}"
 fi
 command -v codex >/dev/null 2>&1 || fail "Codex installed but was not found in PATH. Start a new terminal and run this command again."
