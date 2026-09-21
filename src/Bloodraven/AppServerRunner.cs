@@ -17,12 +17,13 @@ public static class AppServerRunner
 {
     public static async Task<string> RunAsync(AppOptions options, SessionStore sessions, string conversation,
         string prompt, IReadOnlyList<string> images, Action<JsonElement>? progress,
-        Func<string, JsonElement, CancellationToken, Task<bool>> approve, CancellationToken token)
+        Func<string, JsonElement, CancellationToken, Task<bool>> approve, CancellationToken token, ModelSettings? settings = null)
     {
         var start = new ProcessStartInfo(options.CodexExecutable) {
             WorkingDirectory = options.WorkingDirectory, UseShellExecute = false,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
         };
+        (settings ?? new()).AddArguments(start);
         start.ArgumentList.Add("app-server");
         options.RemoveBridgeSecrets(start);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Codex app-server.");
@@ -147,6 +148,7 @@ public static class AppServerRunner
             var input = new List<object> { new { type = "text", text = prompt, text_elements = Array.Empty<object>() } };
             input.AddRange(images.Select(path => (object)new { type = "localImage", path }));
             await Request("turn/start", new { threadId, input, cwd = options.WorkingDirectory,
+                model = settings?.Model, effort = settings?.Effort,
                 approvalPolicy = "untrusted", sandboxPolicy = new { type = "readOnly", networkAccess = false } });
             while (!finished && await lines.MoveNextAsync())
             { using var json = JsonDocument.Parse(lines.Current); await Handle(json.RootElement); }

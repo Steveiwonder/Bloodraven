@@ -2,7 +2,7 @@ namespace Bloodraven;
 
 public static class BotCommands
 {
-    public const string Help = "Bloodraven\n/conversation name — create or switch conversation\n/conversations — list conversations\n/new — reset the current conversation\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks\n/cancel — stop only the running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
+    public const string Help = "Bloodraven\n/conversation name — create or switch conversation\n/conversations — list conversations\n/new — reset the current conversation\n/model ID|default — select model for this conversation\n/reasoning LEVEL|default — select reasoning effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks\n/cancel — stop only the running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
 
     public static bool Apply(JournalData data, long chat, string text, bool defaultApproval)
     {
@@ -12,6 +12,30 @@ public static class BotCommands
         switch (command)
         {
             case "/start": case "/help": Reply(Help); return true;
+            case "/model": case "/reasoning": case "/preset":
+                var settings = ModelSettings.For(data, data.ActiveConversation);
+                if (argument.Length == 0)
+                {
+                    Reply($"Conversation: {data.ActiveConversation}\n{settings.Describe()}\n/model MODEL_ID or /model default\n/reasoning none|minimal|low|medium|high|xhigh|max|ultra|default\n/preset fast|balanced|thorough|default\nUse a model ID supported by your Codex login. Effort support varies by model.");
+                    return true;
+                }
+                if (command == "/model")
+                {
+                    if (argument != "default" && !ModelSettings.ValidModel(argument))
+                    { Reply("Invalid model ID. Use /model MODEL_ID or /model default."); return true; }
+                    settings = settings with { Model = argument == "default" ? null : argument };
+                }
+                else
+                {
+                    var effort = command == "/preset" ? argument switch
+                    { "fast" => "low", "balanced" => "medium", "thorough" => "high", "default" => "default", _ => "invalid" } : argument;
+                    if (effort != "default" && !ModelSettings.ValidEffort(effort))
+                    { Reply(command == "/preset" ? "Use /preset fast|balanced|thorough|default." : "Use /reasoning none|minimal|low|medium|high|xhigh|max|ultra|default. Support varies by model."); return true; }
+                    settings = settings with { Effort = effort == "default" ? null : effort };
+                }
+                data.ModelSettings[data.ActiveConversation] = settings;
+                Reply($"Saved for {data.ActiveConversation}.\n{settings.Describe()}\nApplies to newly queued tasks, including future scheduled runs. Running and queued tasks keep their settings. Defaults remove Bloodraven overrides; Codex controls inherited settings. Unsupported choices may be rejected by Codex.");
+                return true;
             case "/conversation":
                 if (!SessionStore.ValidName(argument)) { Reply("Use /conversation name (1–32 lowercase letters, digits, underscores or hyphens)."); return true; }
                 if (!data.Conversations.Contains(argument))

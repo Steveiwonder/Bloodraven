@@ -231,9 +231,41 @@ Command names and output excerpts are shown as code, with length limits and reda
 
 Only private chats are accepted. If the optional chat ID is set, it must be a valid positive integer; malformed configuration fails startup rather than removing the restriction.
 
+## Model and reasoning controls
+
+Each named conversation remembers its own model and reasoning settings. In Telegram:
+
+```text
+/model
+/model YOUR_MODEL_ID
+/reasoning high
+```
+
+Use the exact model ID available to your Codex login. Bloodraven validates the input format; Codex checks whether your account and model support the selection. There is no automatic fallback to another model if a task fails.
+
+| Command | Effect in the current conversation |
+| --- | --- |
+| `/model` or `/reasoning` | Show saved choices and help |
+| `/model MODEL_ID` | Choose a model |
+| `/model default` | Remove the model override |
+| `/reasoning LEVEL` | Choose `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra` (support depends on the model and CLI) |
+| `/reasoning default` | Remove the reasoning override |
+| `/preset fast` | Low reasoning effort |
+| `/preset balanced` | Medium reasoning effort |
+| `/preset thorough` | High reasoning effort |
+| `/preset default` | Remove the reasoning override; keep the chosen model |
+
+Presets change reasoning effort only. They do not switch models, change approval permissions, or guarantee a response time. Higher effort may take longer and use more of your allowance.
+
+Changes apply to **newly queued tasks**. Running and already queued tasks keep their submitted settings. Future scheduled runs use their conversation's choices when they enter the queue. Settings survive restarts and upgrades, and `/new` clears conversation history while retaining these preferences. Both approval modes support the controls. Your working directory and repository instructions stay the same.
+
+“Codex default” means Bloodraven sends no override for that setting; Codex's configuration and resumed-session behaviour decide the effective value. `/status` and `/health` show the saved Bloodraven choices, not an account model catalogue. To remove both overrides, send `/model default` and `/reasoning default`.
+
+Existing installations need only the normal upgrade command—there are no new setup prompts.
+
 ## Scope
 
-Bloodraven 0.2 supports Ubuntu, one authorised bot owner, named conversations sharing one task queue, photos/documents, recurring schedules and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
+Bloodraven 0.3 supports Ubuntu, one authorised bot owner, named conversations sharing one task queue, photos/documents, recurring schedules, per-conversation model/reasoning controls and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
 
 ## Development
 

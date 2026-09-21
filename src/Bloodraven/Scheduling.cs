@@ -48,7 +48,7 @@ public static class Scheduling
             if (!data.Jobs.Any(j => j.ScheduleId == schedule.Id))
                 data.Jobs.Add(new Job(data.NextScheduledId--, schedule.ChatId, schedule.Prompt,
                     Conversation: schedule.Conversation, ScheduleId: schedule.Id,
-                    ApprovalRequired: data.Approvals ?? defaultApproval));
+                    ApprovalRequired: data.Approvals ?? defaultApproval, Settings: ModelSettings.For(data, schedule.Conversation)));
             data.Schedules[i] = schedule with { NextRun = Next(schedule.Timing, now) };
         }
     }

@@ -17,6 +17,12 @@ if "app-server" in sys.argv:
             with open(os.environ["TEST_CODEX_REQUEST_TRACE"], "a") as trace:
                 trace.write(json.dumps(message) + "\n")
         method = message.get("method")
+        if mode == "model-settings":
+            assert 'model="example-model"' in sys.argv
+            assert 'model_reasoning_effort="high"' in sys.argv
+            if method == "turn/start":
+                assert message["params"]["model"] == "example-model"
+                assert message["params"]["effort"] == "high"
         params = message.get("params", {})
         if method == "initialized":
             continue
