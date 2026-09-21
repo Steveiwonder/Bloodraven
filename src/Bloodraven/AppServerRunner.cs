@@ -17,12 +17,12 @@ public static class AppServerRunner
         start.ArgumentList.Add("app-server");
         options.RemoveBridgeSecrets(start);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Codex app-server.");
-        var descendants = new List<LinuxProcess>();
+        var descendants = new System.Collections.Concurrent.ConcurrentBag<LinuxProcess>();
         using var cancel = token.Register(() =>
         {
             try
             {
-                if (!process.HasExited) { descendants.AddRange(LinuxProcess.Descendants(process.Id)); process.Kill(true); }
+                if (!process.HasExited) { foreach (var child in LinuxProcess.Descendants(process.Id)) descendants.Add(child); process.Kill(true); }
             }
             catch (InvalidOperationException) { }
             catch (System.ComponentModel.Win32Exception) { }
@@ -69,7 +69,8 @@ public static class AppServerRunner
                 if (kind == "fileChange" && item.TryGetProperty("id", out var proposalId))
                 {
                     if (proposals.Count >= 100) proposals.Clear();
-                    proposals[proposalId.GetString()!] = item.Clone();
+                    if (item.GetRawText().Length <= 2600) proposals[proposalId.GetString()!] = item.Clone();
+                    else proposals.Remove(proposalId.GetString()!);
                 }
                 if (name == "item/completed" && kind == "agentMessage" && item.TryGetProperty("text", out var text) &&
                     (!item.TryGetProperty("phase", out var phase) || phase.ValueKind == JsonValueKind.Null || phase.GetString() == "final_answer"))
@@ -143,7 +144,7 @@ public static class AppServerRunner
             try
             {
                 if (!process.HasExited)
-                { descendants.AddRange(LinuxProcess.Descendants(process.Id)); process.Kill(true); }
+                { foreach (var child in LinuxProcess.Descendants(process.Id)) descendants.Add(child); try { process.Kill(true); } catch (InvalidOperationException) { } }
                 await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
                 try { await stderr.WaitAsync(TimeSpan.FromSeconds(10)); } catch (OperationCanceledException) { }
                 var deadline = DateTime.UtcNow.AddSeconds(10);

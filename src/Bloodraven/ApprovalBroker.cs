@@ -20,7 +20,9 @@ public sealed class ApprovalBroker(Journal journal)
         try
         {
             // Do not truncate the proposed command: approval must describe the complete operation.
-            var description = details.ToString();
+            var description = JsonSerializer.Serialize(details, new JsonSerializerOptions {
+                WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
             if (description.Length > 2600)
             {
                 await journal.ChangeAsync(d => Journal.AddReply(d, chatId,

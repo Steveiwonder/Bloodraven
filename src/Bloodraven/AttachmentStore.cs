@@ -1,3 +1,6 @@
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
+
 namespace Bloodraven;
 
 public sealed class AttachmentStore(AppOptions options, TelegramClient telegram)
@@ -78,13 +81,15 @@ public sealed class AttachmentStore(AppOptions options, TelegramClient telegram)
     public async Task<string> ExportAsync(string relative, CancellationToken token)
     {
         var source = ResolveExport(options.WorkingDirectory, relative);
+        // Open each component relative to an already-open directory. This closes
+        // the symlink-swap race between validation and reading the snapshot.
+        await using var input = OpenExport(options.WorkingDirectory, relative);
         var directory = Path.Combine(options.StateDirectory, "outbox", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var destination = Path.Combine(directory, Path.GetFileName(source));
         try
         {
-            await using var input = File.OpenRead(source);
             await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(destination, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             var buffer = new byte[8192]; long total = 0; int count;
@@ -98,4 +103,36 @@ public sealed class AttachmentStore(AppOptions options, TelegramClient telegram)
         }
         catch { Directory.Delete(directory, true); throw; }
     }
+
+    static FileStream OpenExport(string root, string relative)
+    {
+        const int directory = 0x10000, noFollow = 0x20000, closeOnExec = 0x80000, nonBlock = 0x800;
+        var fd = NativeOpen(root, directory | closeOnExec);
+        if (fd < 0) throw new ArgumentException("Cannot open the repository for file export.");
+        SafeFileHandle handle = new((IntPtr)fd, true);
+        try
+        {
+            var parts = relative.Split('/');
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var next = NativeOpenAt(handle, parts[i], noFollow | closeOnExec | nonBlock | (i < parts.Length - 1 ? directory : 0));
+                if (next < 0) throw new ArgumentException("Cannot export this file; check its permissions and ensure the path contains no symlinks.");
+                handle.Dispose();
+                handle = new SafeFileHandle((IntPtr)next, true);
+            }
+            if (NativeStatx(handle, "", 0x1000, 1, out var stat) != 0 || (stat.Mode & 0xf000) != 0x8000)
+                throw new ArgumentException("Only regular files can be exported (no pipes, sockets or devices).");
+            return new FileStream(handle, FileAccess.Read);
+        }
+        catch { handle.Dispose(); throw; }
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    struct LinuxStatx { [FieldOffset(28)] public ushort Mode; }
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    static extern int NativeOpen(string path, int flags);
+    [DllImport("libc", EntryPoint = "openat", SetLastError = true)]
+    static extern int NativeOpenAt(SafeFileHandle directory, string path, int flags);
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    static extern int NativeStatx(SafeFileHandle file, string path, int flags, uint mask, out LinuxStatx stat);
 }

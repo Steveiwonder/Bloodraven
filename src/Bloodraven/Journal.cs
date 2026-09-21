@@ -37,6 +37,9 @@ public sealed class Journal(AppOptions options)
                 ?? throw new InvalidDataException("Invalid journal; restore it from backup instead of discarding work.");
         await ChangeAsync(d =>
         {
+            if (d.Approvals ?? options.ApprovalDefault)
+                for (var i = 0; i < d.Jobs.Count; i++)
+                    if (!d.Jobs[i].Running) d.Jobs[i] = d.Jobs[i] with { ApprovalRequired = true };
             d.Replies.RemoveAll(r => r.Buttons?.SelectMany(row => row).Any(b => b.Data.StartsWith("approve:", StringComparison.Ordinal)) == true);
             foreach (var job in d.Jobs.Where(j => j.Running).ToArray())
             {
@@ -97,7 +100,7 @@ public static class AtomicFile
 public sealed class SessionStore(AppOptions options)
 {
     readonly SemaphoreSlim gate = new(1);
-    static readonly System.Text.RegularExpressions.Regex NamePattern = new("^[a-z0-9][a-z0-9_-]{0,31}$");
+    static readonly System.Text.RegularExpressions.Regex NamePattern = new("^[a-z0-9][a-z0-9_-]{0,31}\\z");
     public static bool ValidName(string name) => NamePattern.IsMatch(name);
     string FilePath(string name, bool approved)
     {
@@ -117,7 +120,7 @@ public sealed class SessionStore(AppOptions options)
         }
         finally { gate.Release(); }
     }
-    static bool ValidId(string id) => System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_-]{1,128}$");
+    static bool ValidId(string id) => System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_-]{1,128}\\z");
     public async Task SetAsync(string id, CancellationToken token, string name = "default", bool approved = false)
     {
         if (!ValidId(id)) throw new InvalidDataException("Codex returned an invalid session ID.");

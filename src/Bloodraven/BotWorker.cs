@@ -298,6 +298,16 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 logger.LogWarning("Reply delivery unavailable (status {Status}); retaining reply for retry.", ex.Status);
                 await Task.Delay(TimeSpan.FromSeconds(ex.RetryAfter), token);
             }
+            catch (Exception ex) when (reply.DocumentPath is not null && ex is IOException or InvalidDataException or UnauthorizedAccessException)
+            {
+                logger.LogWarning("Queued attachment unavailable ({ErrorType}).", ex.GetType().Name);
+                await journal.ChangeAsync(d =>
+                {
+                    var index = d.Replies.FindIndex(r => r.Id == reply.Id);
+                    if (index >= 0) d.Replies[index] = reply with { DocumentPath = null, Part = 0,
+                        Text = "The queued file is no longer available. Request it again with /file after checking the local file." };
+                }, token);
+            }
         }
     }
 
