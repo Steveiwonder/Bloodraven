@@ -20,7 +20,7 @@ Please report vulnerabilities privately through GitHub Security Advisories rathe
 
 ## Approval mode and files
 
-Native approval mode uses Codex app-server with a read-only sandbox and `unlessTrusted` policy. The bridge responds to command/file requests only after the configured owner approves the complete displayed operation. Unknown requests, oversized proposals and additional permission grants fail closed. Approval buttons are bound to a random, single-use, in-memory request and the private chat, and expire with the task or after five minutes. They cannot authorise a later run after restart.
+Native approval mode uses Codex app-server with a read-only sandbox and `untrusted` policy. The bridge responds to command/file requests only after the configured owner approves the complete displayed operation. Unknown requests, oversized proposals and additional permission grants fail closed. Approval buttons are bound to a random, single-use, in-memory request and the private chat, and expire with the task or after five minutes. They cannot authorise a later run after restart.
 
 Codex decides which operations need approval. Existing Codex execution rules and external MCP tools must be reviewed separately; an MCP server can have privileges outside the local command sandbox. Approval mode is not a guarantee that every externally visible effect will produce a button. Do not configure untrusted external tools and assume the shell sandbox confines them.
 
