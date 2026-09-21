@@ -48,9 +48,17 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
             }
             start.ArgumentList.Add("-"); // Prompts are stdin data, never CLI options.
             using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Codex.");
+            var descendants = new List<LinuxProcess>();
             using var registration = run.Token.Register(() =>
             {
-                try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        descendants.AddRange(LinuxProcess.Descendants(process.Id));
+                        process.Kill(entireProcessTree: true);
+                    }
+                }
                 catch (InvalidOperationException) { }
                 catch (System.ComponentModel.Win32Exception) { /* Rechecked in finally; never start another task if reaping fails. */ }
             });
@@ -110,11 +118,55 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 {
                     if (!process.HasExited) process.Kill(entireProcessTree: true);
                     await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+                    // WaitForExit only waits for the root, not its descendants. Do not report idle
+                    // while a child is still processing the termination signal.
+                    var deadline = DateTime.UtcNow.AddSeconds(10);
+                    while (descendants.Any(p => p.IsAlive()))
+                    {
+                        if (DateTime.UtcNow >= deadline) throw new TimeoutException("A Codex descendant did not exit.");
+                        await Task.Delay(20);
+                    }
                 }
                 catch (Exception ex) { throw new FatalRunnerException("Unable to reap Codex; stopping the service to prevent overlapping tasks.", ex); }
             }
         }
         finally { lock (gate) current = null; }
+    }
+}
+
+// Ubuntu-specific identity checks include start time so a recycled PID is never confused
+// with a child we terminated. Zombies are already dead and await their parent's reaper.
+sealed record LinuxProcess(int Id, int Parent, string Start, string State)
+{
+    static LinuxProcess? Read(int id)
+    {
+        try
+        {
+            var stat = File.ReadAllText($"/proc/{id}/stat");
+            var fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ');
+            return new LinuxProcess(id, int.Parse(fields[1]), fields[19], fields[0]);
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+    public bool IsAlive()
+    {
+        var now = Read(Id);
+        return now is not null && now.Start == Start && now.State is not "Z" and not "X";
+    }
+    public static List<LinuxProcess> Descendants(int parent)
+    {
+        if (!OperatingSystem.IsLinux()) return [];
+        var processes = Directory.EnumerateDirectories("/proc").Select(Path.GetFileName)
+            .Where(name => int.TryParse(name, out _)).Select(name => Read(int.Parse(name!)))
+            .OfType<LinuxProcess>().ToArray();
+        var found = new List<LinuxProcess>();
+        var parents = new Queue<int>();
+        parents.Enqueue(parent);
+        while (parents.TryDequeue(out var id))
+            foreach (var child in processes.Where(p => p.Parent == id))
+            { found.Add(child); parents.Enqueue(child.Id); }
+        return found;
     }
 }
 
