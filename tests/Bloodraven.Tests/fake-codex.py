@@ -28,6 +28,15 @@ if "app-server" in sys.argv:
             continue
         if method == "initialize":
             send({"id": message["id"], "result": {}})
+        elif method == "model/list":
+            assert params["includeHidden"] is False
+            if mode == "catalogue-error":
+                send({"id": message["id"], "error": {"code": -1, "message": "private details"}})
+            elif params.get("cursor") is None:
+                send({"id": message["id"], "result": {"data": [{"model": "model-one", "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "high"}]}], "nextCursor": "page2"}})
+            else:
+                assert params["cursor"] == "page2"
+                send({"id": message["id"], "result": {"data": [{"model": "model-two", "supportedReasoningEfforts": [{"reasoningEffort": "medium"}]}], "nextCursor": None}})
         elif method in ("thread/start", "thread/resume"):
             if mode == "reject-thread":
                 send({"id": message["id"], "error": {"code": -32602, "message": "private upstream diagnostic"}})

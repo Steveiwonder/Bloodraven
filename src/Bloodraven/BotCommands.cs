@@ -2,7 +2,7 @@ namespace Bloodraven;
 
 public static class BotCommands
 {
-    public const string Help = "Bloodraven\n/conversation name — create or switch conversation\n/conversations — list conversations\n/new — reset the current conversation\n/model ID|default — select model for this conversation\n/reasoning LEVEL|default — select reasoning effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks\n/cancel — stop only the running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
+    public const string Help = "Bloodraven\n/conversation name — create or switch conversation\n/conversations — list conversations\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks\n/cancel — stop only the running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
 
     public static bool Apply(JournalData data, long chat, string text, bool defaultApproval)
     {
@@ -12,7 +12,7 @@ public static class BotCommands
         switch (command)
         {
             case "/start": case "/help": Reply(Help); return true;
-            case "/model": case "/reasoning": case "/preset":
+            case "/model": case "/reasoning": case "/effort": case "/preset":
                 var settings = ModelSettings.For(data, data.ActiveConversation);
                 if (argument.Length == 0)
                 {

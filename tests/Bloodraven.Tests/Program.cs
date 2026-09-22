@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("model catalogue paginates and menus bind conversations", CatalogueMenus),
     ("tables become readable Telegram sections", Tables),
     ("model settings persist per conversation and pin scheduled jobs", ModelPreferences),
     ("model settings reach new and resumed runners", ModelRunners),
@@ -108,6 +109,33 @@ static async Task ModelRunners()
         Assert(await runner.RunAsync(name, default, approve: (_, _, _) => Task.FromResult(false),
             settings: new ModelSettings("example-model", "high")) == "decline");
     await Throws<InvalidDataException>(() => runner.RunAsync("invalid", default, settings: new ModelSettings("x\";bad")));
+}
+static async Task CatalogueMenus()
+{
+    using var fixture = new Fixture();
+    var catalogue = await ModelCatalogue.ReadAsync(fixture.Options, default);
+    Assert(catalogue.Count == 2 && catalogue[1].Id == "model-two");
+    var state = new JournalData();
+    BotCommands.Apply(state, 123, "/effort high", false);
+    Assert(ModelSettings.For(state, "default").Effort == "high");
+    var menus = new ModelMenus();
+    menus.Show(state, 123, true, catalogue);
+    var choice = state.Replies.Last().Buttons![1][0].Data["choice:".Length..];
+    Assert(menus.Select(state, 999, choice).StartsWith("Menu expired"));
+    state.ActiveConversation = "other";
+    menus.Select(state, 123, choice);
+    Assert(ModelSettings.For(state, "default") == new ModelSettings("model-one"));
+    Assert(ModelSettings.For(state, "other") == new ModelSettings());
+    Assert(menus.Select(state, 123, choice).StartsWith("Menu expired"));
+    state.ActiveConversation = "default";
+    menus.Show(state, 123, false, catalogue);
+    var buttons = state.Replies.Last().Buttons!;
+    Assert(buttons.Length == 3 && buttons[2][0].Text == "high");
+    menus.Select(state, 123, buttons[2][0].Data["choice:".Length..]);
+    Assert(ModelSettings.For(state, "default").Effort == "high");
+    Assert(new ModelMenus().Select(state, 123, choice).StartsWith("Menu expired"));
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "catalogue-error");
+    await Throws<IOException>(() => ModelCatalogue.ReadAsync(fixture.Options, default));
 }
 static Task Tables()
 {

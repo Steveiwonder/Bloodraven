@@ -21,6 +21,7 @@ def main(schema_directory, trace_file, executable):
         "thread/start": "ThreadStartParams.json",
         "thread/resume": "ThreadResumeParams.json",
         "turn/start": "TurnStartParams.json",
+        "model/list": "ModelListParams.json",
     }
     seen = set()
     validators = {}

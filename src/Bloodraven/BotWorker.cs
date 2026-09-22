@@ -7,6 +7,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     readonly ApprovalBroker approvals = new(journal);
     readonly AttachmentStore attachments = new(options, telegram);
     readonly object taskGate = new();
+    readonly ModelMenus modelMenus = new();
     CancellationTokenSource? activeTask;
     DateTimeOffset nextSend;
     DateTimeOffset? lastPoll;
@@ -133,6 +134,20 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     allowed = text.Length > 0 || error is not null;
                 }
                 var command = Command(text);
+                IReadOnlyList<AvailableModel>? catalogue = null;
+                var menuRequested = allowed && (command is "/model" or "/effort" or "/reasoning") &&
+                    text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length == 1;
+                if (menuRequested)
+                {
+                    try { catalogue = await ModelCatalogue.ReadAsync(options, token); }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning("Model catalogue unavailable ({ErrorType}).", ex.GetType().Name);
+                        error = "Could not read the Codex model catalogue. Check Codex login/version and retry. You can still use /model ID or /effort LEVEL.";
+                        if (command != "/model") { catalogue = []; error = null; }
+                    }
+                }
                 var status = allowed && command is "/status" or "/health" ? await StatusAsync(state, command == "/health", token) : null;
                 await journal.ChangeAsync(d =>
                 {
@@ -140,6 +155,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     if (!allowed) return;
                     var chat = message!.Chat.Id;
                     if (error is not null) { Journal.AddReply(d, chat, error); return; }
+                    if (menuRequested && catalogue is not null) { modelMenus.Show(d, chat, command == "/model", catalogue); return; }
                     if (text.Length > 16384) { Journal.AddReply(d, chat, "Message too large (maximum 16,384 characters)."); return; }
                     if (command == "/cancel") return;
                     if (status is not null) { Journal.AddReply(d, chat, status); return; }
@@ -179,6 +195,13 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             if (!allowed) return;
             var parts = (callback.Data ?? "").Split(':', 2);
             if (parts.Length != 2) return;
+            if (parts[0] == "choice")
+            {
+                var result = modelMenus.Select(d, message!.Chat.Id, parts[1]);
+                Journal.AddReply(d, message.Chat.Id, result);
+                answer = "See the settings reply.";
+                return;
+            }
             if (parts[0] is "approve" or "decline")
             {
                 answer = approvals.Decide(parts[1], message!.Chat.Id, parts[0] == "approve")
