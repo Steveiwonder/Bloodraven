@@ -235,6 +235,10 @@ Only private chats are accepted. If the optional chat ID is set, it must be a va
 
 Each named conversation remembers its own model and reasoning settings. In Telegram:
 
+Send `/model` to list models reported by your installed Codex, with buttons to select one. Send `/effort` (or `/reasoning`) to choose a reasoning level. For an explicitly selected model, the menu lists the levels Codex reports for it. If the effective model is inherited or the catalogue is unavailable, the effort menu clearly labels its general, model-dependent list. Manual `/model MODEL_ID` and `/effort LEVEL` commands also work.
+
+Buttons apply to the conversation where the menu was opened, expire after ten minutes or a restart, and reject choices if its saved settings have since changed. Choosing a model with a button clears the previous effort override; use `/effort` to select a compatible level afterwards. The catalogue request never starts a model turn. If model discovery fails, the bot reports it without guessing a model list.
+
 ```text
 /model
 /model YOUR_MODEL_ID
@@ -245,10 +249,11 @@ Use the exact model ID available to your Codex login. Bloodraven validates the i
 
 | Command | Effect in the current conversation |
 | --- | --- |
-| `/model` or `/reasoning` | Show saved choices and help |
+| `/model` | List available models with selection buttons |
+| `/effort` or `/reasoning` | List reasoning levels with selection buttons |
 | `/model MODEL_ID` | Choose a model |
 | `/model default` | Remove the model override |
-| `/reasoning LEVEL` | Choose `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra` (support depends on the model and CLI) |
+| `/effort LEVEL` or `/reasoning LEVEL` | Choose `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra` (support depends on the model and CLI) |
 | `/reasoning default` | Remove the reasoning override |
 | `/preset fast` | Low reasoning effort |
 | `/preset balanced` | Medium reasoning effort |
