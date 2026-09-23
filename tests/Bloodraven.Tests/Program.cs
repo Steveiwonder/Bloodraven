@@ -88,6 +88,7 @@ static async Task WorkerTimings()
     var journal = new Journal(fixture.Options);
     var replies = new List<string>();
     var date = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    var finalAttempts = 0;
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
@@ -100,7 +101,10 @@ static async Task WorkerTimings()
             object[] updates = offset == 0 ? [Update(1, "hello timing test")] : offset == 2 && done ? [Update(2, "/timings", 999), Update(3, "/timings")] : [];
             return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
         }
-        lock (replies) replies.Add(body.RootElement.GetProperty("text").GetString()!);
+        var outgoing = body.RootElement.GetProperty("text").GetString()!;
+        if (outgoing.Contains("hello timing test") && Interlocked.Increment(ref finalAttempts) == 1)
+            return Response(429, "{\"ok\":false,\"parameters\":{\"retry_after\":1}}");
+        lock (replies) replies.Add(outgoing);
         return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
     var sessions = new SessionStore(fixture.Options);
@@ -115,11 +119,11 @@ static async Task WorkerTimings()
         }
         var state = await journal.SnapshotAsync(default);
         var report = state.Timings.Single();
-        Assert(report.TelegramDate == date && report.Id == 1 && report.Parts == 1 && report.Attempts == 1);
+        Assert(report.TelegramDate == date && report.Id == 1 && report.Parts == 1 && report.Attempts == 2);
         Assert(report.Status == "Completed; delivered" && report.SendWaitMs > 0);
         foreach (var name in new[] { "Received", "Queued", "Started", "Attachments ready", "Process started", "Final answer", "Reply ready", "Delivery started", "Delivered" })
             Assert(report.Points.Any(p => p.Name == name), name);
-        lock (replies) Assert(replies.Count(t => t.Contains("Timings · task")) == 1, "Timings command duplicated or authorization bypassed");
+        lock (replies) Assert(replies.Count(t => WebUtility.HtmlDecode(t).Contains("Timings · task")) == 1, "Timings command duplicated or authorization bypassed");
         Assert(state.Jobs.Count == 0 && state.Offset == 4);
     }
     finally { await worker.StopAsync(default); }
