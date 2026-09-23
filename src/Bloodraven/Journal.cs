@@ -7,7 +7,8 @@ public sealed record Job(long Id, long ChatId, string Text, bool Running = false
     string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null,
     long? ProgressMessageId = null, bool ApprovalRequired = false, ModelSettings? Settings = null);
 public sealed record Reply(string Id, long ChatId, string Text, int Part = 0,
-    InlineButton[][]? Buttons = null, long? EditMessageId = null, long? ProgressJobId = null, string? DocumentPath = null, bool Plain = false);
+    InlineButton[][]? Buttons = null, long? EditMessageId = null, long? ProgressJobId = null, string? DocumentPath = null, bool Plain = false,
+    long? TimingJobId = null, string? TimingKind = null);
 public sealed record Schedule(string Id, long ChatId, string Prompt, string Conversation,
     string Timing, DateTimeOffset NextRun, bool Paused = false);
 public sealed record TaskOutcome(long Id, string Conversation, string Status, DateTimeOffset Finished);
@@ -20,6 +21,7 @@ public sealed class JournalData
     public List<string> Conversations { get; set; } = ["default"];
     public List<Schedule> Schedules { get; set; } = [];
     public List<TaskOutcome> Outcomes { get; set; } = [];
+    public List<TimingReport> Timings { get; set; } = [];
     public bool? Approvals { get; set; }
     public Dictionary<string, ModelSettings> ModelSettings { get; set; } = [];
     public long NextScheduledId { get; set; } = -1;
@@ -47,6 +49,8 @@ public sealed class Journal(AppOptions options)
                 AddReply(d, job.ChatId, $"Task {job.Id} was interrupted by a restart. It may have made changes; review them before sending it again. It has NOT been rerun.");
                 d.Jobs.Remove(job);
                 d.Outcomes.Add(new TaskOutcome(job.Id, job.Conversation, "Interrupted by restart", DateTimeOffset.UtcNow));
+                var timing = d.Timings.FirstOrDefault(t => t.Id == job.Id);
+                if (timing is not null) TaskTimings.Save(d, timing with { Status = "Interrupted by restart", AcrossRestart = true });
                 if (job.ProgressMessageId is > 0)
                     d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, "Interrupted by restart", EditMessageId: job.ProgressMessageId));
             }
@@ -75,7 +79,7 @@ public sealed class Journal(AppOptions options)
     static JournalData Clone(JournalData value) => new() {
         Offset = value.Offset, Jobs = [.. value.Jobs], Replies = [.. value.Replies],
         ActiveConversation = value.ActiveConversation, Conversations = [.. value.Conversations],
-        Schedules = [.. value.Schedules], Outcomes = [.. value.Outcomes], Approvals = value.Approvals,
+        Schedules = [.. value.Schedules], Outcomes = [.. value.Outcomes], Timings = [.. value.Timings], Approvals = value.Approvals,
         NextScheduledId = value.NextScheduledId, ModelSettings = new(value.ModelSettings)
     };
     public static void AddReply(JournalData data, long chatId, string text) =>

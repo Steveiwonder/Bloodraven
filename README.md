@@ -23,6 +23,16 @@ Bloodraven is a small, self-hosted Telegram interface for the OpenAI Codex CLI. 
 
 Bloodraven stores no personal configuration in Git. Its installer writes secrets to `/etc/bloodraven/bloodraven.env` with mode `0600` and conversation state to `/var/lib/bloodraven`.
 
+## Find out where a reply is slow
+
+Version 0.3.6 automatically records timing checkpoints for each incoming prompt. Send your prompt, wait for the reply, then send `/timings`. It shows the latest task in the current conversation. You can also inspect a specific task with `/timings TASK_ID`, or request timings while a task is still running.
+
+The report includes Telegram's original timestamp, queue wait, attachment handling, Codex process startup, prompt submission, final answer event, runner cleanup, reply queue wait, and final delivery. Telegram pacing/lock waits and send requests are measured separately, including retries and multipart replies. Approval waits are included when applicable. A timeline, model/effort settings, execution mode and Bloodraven version make reports useful for troubleshooting. Send the report when reporting a slow response.
+
+The last 50 reports are retained in the existing private state journal, plus reports needed by pending work. They survive upgrades/restarts and contain no prompts, answers, command output or credentials. Existing conversations are preserved. Reports are available only to your configured Telegram user in the configured private chat.
+
+Telegram timestamps have whole-second precision, so Telegram-to-bridge and end-to-end estimates assume synchronized clocks. The endpoint is Telegram accepting the final reply, not your phone displaying it. Codex time includes network, model and tool execution; the CLI does not expose a separate duration for each of those. Stages can overlap, so do not add every displayed duration. Restarts and missing checkpoints are labelled explicitly. Timing collection does not add a disk write for each event.
+
 ## One-command Ubuntu installation
 
 First change into the Git repository that Codex should use, then run the installer as your normal Ubuntu user—not as `root`:

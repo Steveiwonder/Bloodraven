@@ -8,32 +8,46 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     readonly AttachmentStore attachments = new(options, telegram);
     readonly object taskGate = new();
     readonly ModelMenus modelMenus = new();
+    readonly System.Collections.Concurrent.ConcurrentDictionary<long, TaskTimings> timings = new();
     CancellationTokenSource? activeTask;
     DateTimeOffset nextSend;
     DateTimeOffset? lastPoll;
     public static string Version => typeof(BotWorker).Assembly.GetName().Version?.ToString(3) ?? "unknown";
 
     async Task<long> SendPacedAsync(long chatId, FormattedMessage message, CancellationToken token,
-        InlineButton[][]? buttons = null, long? edit = null, string? document = null)
+        InlineButton[][]? buttons = null, long? edit = null, string? document = null, TaskTimings? timing = null)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         await sendGate.WaitAsync(token);
+        double waitMs = 0;
+        bool attempted = false, success = false;
         try
         {
             var delay = nextSend - DateTimeOffset.UtcNow;
             if (delay > TimeSpan.Zero) await Task.Delay(delay, token);
+            waitMs = clock.Elapsed.TotalMilliseconds;
+            attempted = true;
             long id = 0;
             if (document is null) id = await telegram.SendAsync(chatId, message, token, buttons, edit);
             else await telegram.SendDocumentAsync(chatId, document, token);
+            success = true;
             nextSend = DateTimeOffset.UtcNow.AddMilliseconds(1100);
             return id;
         }
         catch (TelegramException ex) { nextSend = DateTimeOffset.UtcNow.AddSeconds(ex.RetryAfter); throw; }
-        finally { sendGate.Release(); }
+        finally
+        {
+            if (attempted) timing?.Delivery(waitMs, clock.Elapsed.TotalMilliseconds - waitMs, success);
+            sendGate.Release();
+        }
     }
 
     async Task<string> RunWithProgressAsync(Job job, CancellationToken token)
     {
+        timings.TryGetValue(job.Id, out var timing);
+        timing?.Mark("Attachments started");
         var (prompt, images) = await attachments.PrepareAsync(job, token);
+        timing?.Mark("Attachments ready");
         var progress = new TaskProgress(options.TelegramBotToken);
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         var reporting = progress.RunAsync(TimeSpan.FromSeconds(options.ProgressIntervalSeconds), async (text, ct) =>
@@ -51,7 +65,12 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         try
         {
             return await codex.RunAsync(prompt, token, progress.Observe, job.Conversation, images,
-                job.ApprovalRequired ? (method, details, ct) => approvals.RequestAsync(job.ChatId, job.Conversation, method, details, ct) : null, job.Settings);
+                job.ApprovalRequired ? async (method, details, ct) =>
+                {
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    try { return await approvals.RequestAsync(job.ChatId, job.Conversation, method, details, ct); }
+                    finally { timing?.Approval(clock.Elapsed.TotalMilliseconds); }
+                } : null, job.Settings, timing);
         }
         finally
         {
@@ -67,6 +86,12 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             FileAccess.ReadWrite, FileShare.None);
         await Preflight.CheckAsync(options, stoppingToken);
         await journal.InitializeAsync(stoppingToken);
+        var recovered = await journal.SnapshotAsync(stoppingToken);
+        foreach (var report in recovered.Timings.Where(r => recovered.Jobs.Any(j => j.Id == r.Id) || recovered.Replies.Any(p => p.TimingJobId == r.Id)))
+        {
+            var gap = new TimingPoint("Service resumed", DateTimeOffset.UtcNow, Math.Max(report.Points.LastOrDefault()?.Milliseconds ?? 0, (DateTimeOffset.UtcNow - report.Received).TotalMilliseconds));
+            timings[report.Id] = new TaskTimings(report with { AcrossRestart = true, Points = [.. report.Points, gap] });
+        }
         attachments.CleanupStale(await journal.SnapshotAsync(stoppingToken));
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         Task[] tasks = [PollAsync(lifetime.Token), ConsumeAsync(lifetime.Token), DeliverAsync(lifetime.Token), ScheduleAsync(lifetime.Token)];
@@ -111,6 +136,8 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 await Task.Delay(TimeSpan.FromSeconds(ex.RetryAfter), token); continue;
             }
             lastPoll = DateTimeOffset.UtcNow;
+            var receivedAt = lastPoll.Value;
+            var receivedTick = System.Diagnostics.Stopwatch.GetTimestamp();
             await AtomicFile.WriteAsync(Path.Combine(options.StateDirectory, "ready"), lastPoll.Value.ToString("O"), token);
             foreach (var update in updates)
             {
@@ -159,6 +186,19 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     if (text.Length > 16384) { Journal.AddReply(d, chat, "Message too large (maximum 16,384 characters)."); return; }
                     if (command == "/cancel") return;
                     if (status is not null) { Journal.AddReply(d, chat, status); return; }
+                    if (command == "/timings")
+                    {
+                        var arg = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                        long requested = 0;
+                        if (arg.Length > 2 || (arg.Length == 2 && !long.TryParse(arg[1], out requested)))
+                        { Journal.AddReply(d, chat, "Use /timings or /timings TASK_ID."); return; }
+                        var report = d.Timings.Where(t => t.ChatId == chat && (arg.Length == 2 ? t.Id == requested : t.Conversation == d.ActiveConversation))
+                            .OrderByDescending(t => t.Received).FirstOrDefault();
+                        if (report is not null && timings.TryGetValue(report.Id, out var live)) report = live.Snapshot();
+                        if (report?.Status == "Queued" && !d.Jobs.Any(j => j.Id == report.Id)) report = report with { Status = "Removed from queue" };
+                        Journal.AddReply(d, chat, report is null ? "No timing report yet. Send a prompt first; timings start with this version." : TaskTimings.Format(report));
+                        return;
+                    }
                     if (BotCommands.Apply(d, chat, text, options.ApprovalDefault)) return;
                     if (text.StartsWith('/') && command is not ("/new" or "/file"))
                     { Journal.AddReply(d, chat, "Unknown command. Use /help for Bloodraven commands, or send a normal message to Codex."); return; }
@@ -168,7 +208,14 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                         d.Jobs.Add(new Job(update.UpdateId, chat, text, Conversation: d.ActiveConversation,
                             Attachments: files, ApprovalRequired: d.Approvals ?? options.ApprovalDefault,
                             Settings: ModelSettings.For(d, d.ActiveConversation)));
-                        Journal.AddReply(d, chat, $"Queued · {d.ActiveConversation}.");
+                        var selected = ModelSettings.For(d, d.ActiveConversation);
+                        var report = new TimingReport(update.UpdateId, chat, d.ActiveConversation, receivedAt, message.Date,
+                            selected.Model ?? "Codex default", selected.Effort ?? "Codex default",
+                            (d.Approvals ?? options.ApprovalDefault) ? "app-server" : "exec", "Queued",
+                            [new TimingPoint("Received", receivedAt, 0), new TimingPoint("Queued", DateTimeOffset.UtcNow, System.Diagnostics.Stopwatch.GetElapsedTime(receivedTick).TotalMilliseconds)], Version: Version);
+                        timings[update.UpdateId] = new TaskTimings(report);
+                        TaskTimings.Save(d, report);
+                        d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chat, $"Queued · {d.ActiveConversation}.", TimingJobId: update.UpdateId, TimingKind: "Acknowledged"));
                     }
                 }, token);
                 if (allowed && error is null && command == "/cancel")
@@ -181,6 +228,10 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 state = await journal.SnapshotAsync(token);
                 if (state.Replies.Count >= 100) break;
             }
+            // Removed queued tasks must not retain live collectors indefinitely.
+            var keep = await journal.SnapshotAsync(token);
+            foreach (var id in timings.Keys)
+                if (!keep.Jobs.Any(j => j.Id == id) && !keep.Replies.Any(r => r.TimingJobId == id)) timings.TryRemove(id, out _);
         }
     }
 
@@ -243,8 +294,13 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 var index = d.Jobs.FindIndex(j => !j.Running);
                 if (index < 0) return;
                 job = d.Jobs[index] with { Running = true };
+                if (timings.TryGetValue(job.Id, out var trace))
+                {
+                    trace.Status("Running"); trace.Mark("Started");
+                    TaskTimings.Save(d, trace.Snapshot());
+                }
                 d.Jobs[index] = job;
-                d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, $"Working… · {job.Conversation}", ProgressJobId: job.Id));
+                d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, $"Working… · {job.Conversation}", ProgressJobId: job.Id, TimingJobId: job.Id, TimingKind: "Working notice"));
             }, token);
             if (job is null) continue;
             using var taskLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -310,6 +366,11 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 result += $"\nSubmitted settings:\n{selected.Describe()}\nCheck that your Codex login and model support these choices; /model and /reasoning change settings for new tasks.";
             await journal.ChangeAsync(d =>
             {
+                if (timings.TryGetValue(job.Id, out var trace))
+                {
+                    trace.Status(outcome + "; awaiting delivery"); trace.Mark("Reply ready");
+                    TaskTimings.Save(d, trace.Snapshot());
+                }
                 var current = d.Jobs.FirstOrDefault(j => j.Id == job.Id);
                 if (current?.ProgressMessageId is > 0)
                     d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, $"{outcome} · {job.Conversation}", EditMessageId: current.ProgressMessageId));
@@ -317,7 +378,8 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 d.Outcomes.Add(new TaskOutcome(job.Id, job.Conversation, outcome, DateTimeOffset.UtcNow));
                 if (d.Outcomes.Count > 50) d.Outcomes.RemoveRange(0, d.Outcomes.Count - 50);
                 d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId,
-                    job.Conversation == "default" ? result : $"Conversation: {job.Conversation}\n\n{result}", DocumentPath: document));
+                    job.Conversation == "default" ? result : $"Conversation: {job.Conversation}\n\n{result}", DocumentPath: document,
+                    TimingJobId: job.Id, TimingKind: "Final"));
             }, token);
             attachments.Cleanup(job.Id);
         }
@@ -329,13 +391,24 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         {
             var reply = (await journal.SnapshotAsync(token)).Replies.FirstOrDefault();
             if (reply is null) { await Task.Delay(250, token); continue; }
+            TaskTimings? timing = null;
+            if (reply.TimingJobId is { } timingId) timings.TryGetValue(timingId, out timing);
+            if (reply.TimingKind == "Final") timing?.Mark("Delivery started", first: true);
             IReadOnlyList<FormattedMessage> parts = reply.Plain ? new[] { new FormattedMessage(System.Net.WebUtility.HtmlEncode(reply.Text), reply.Text) } : TelegramFormatter.Format(reply.Text);
             try
             {
                 var id = await SendPacedAsync(reply.ChatId, parts[reply.Part], token,
-                    reply.Part + 1 == parts.Count ? reply.Buttons : null, reply.EditMessageId, reply.DocumentPath);
+                    reply.Part + 1 == parts.Count ? reply.Buttons : null, reply.EditMessageId, reply.DocumentPath,
+                    reply.TimingKind == "Final" ? timing : null);
+                var complete = reply.Part + 1 == parts.Count || reply.DocumentPath is not null;
+                if (timing is not null && complete)
+                {
+                    timing.Mark(reply.TimingKind == "Final" ? "Delivered" : reply.TimingKind!);
+                    if (reply.TimingKind == "Final") timing.Status(timing.Snapshot().Status.Replace("; awaiting delivery", "; delivered"));
+                }
                 await journal.ChangeAsync(d =>
                 {
+                    if (timing is not null) TaskTimings.Save(d, timing.Snapshot());
                     var index = d.Replies.FindIndex(r => r.Id == reply.Id);
                     if (index < 0) return;
                     if (reply.Part + 1 == parts.Count || reply.DocumentPath is not null) d.Replies.RemoveAt(index);
@@ -356,6 +429,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             }
             catch (TelegramException ex)
             {
+                if (timing is not null) await journal.ChangeAsync(d => TaskTimings.Save(d, timing.Snapshot()), token);
                 if (reply.EditMessageId is not null && ex.Status == 400)
                 { await journal.ChangeAsync(d => d.Replies.RemoveAll(r => r.Id == reply.Id), token); continue; }
                 logger.LogWarning("Reply delivery unavailable (status {Status}); retaining reply for retry.", ex.Status);

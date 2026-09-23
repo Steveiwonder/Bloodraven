@@ -23,7 +23,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
 
     public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null,
         string conversation = "default", IReadOnlyList<string>? images = null,
-        Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null, ModelSettings? settings = null)
+        Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null, ModelSettings? settings = null, TaskTimings? timing = null)
     {
         using var run = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         run.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
@@ -35,11 +35,12 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         try
         {
             if (approve is not null)
-                return await AppServerRunner.RunAsync(options, sessions, conversation, prompt, images ?? [], progress, approve, run.Token, settings);
+                return await AppServerRunner.RunAsync(options, sessions, conversation, prompt, images ?? [], progress, approve, run.Token, settings, timing);
             string? sessionId;
             try { sessionId = await sessions.GetAsync(run.Token, conversation); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             { throw new CodexFailure("session-load", "could not read saved session; check session storage", false, cause: ex.GetType().Name); }
+            timing?.Mark(sessionId is null ? "New session" : "Resuming session");
             var start = new ProcessStartInfo(options.CodexExecutable)
             {
                 WorkingDirectory = options.WorkingDirectory, UseShellExecute = false,
@@ -63,6 +64,8 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 { throw new CodexFailure("process-start", "could not launch Codex; check executable path and service permissions", sessionId is not null, cause: ex.GetType().Name); }
             }
             using var process = StartProcess();
+            timing?.Mark("Process started");
+            timing?.Mark("Session ready");
             var descendants = new List<LinuxProcess>();
             using var registration = run.Token.Register(() =>
             {
@@ -94,6 +97,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 await foreach (var line in BoundedLines.ReadAsync(process.StandardOutput, 1_048_576, run.Token))
                 {
                     if (string.IsNullOrWhiteSpace(line)) continue;
+                    timing?.Mark("First event", first: true);
                     using var json = JsonDocument.Parse(line);
                     var root = json.RootElement;
                     var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
@@ -107,6 +111,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                         item.TryGetProperty("text", out var text))
                     {
                         finalMessage = text.GetString();
+                        timing?.Mark("Final answer");
                         if (finalMessage?.Length > 100_000) throw new InvalidDataException("Codex response exceeded 100,000 characters.");
                     }
                 }
@@ -127,6 +132,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
             {
                 await process.StandardInput.WriteAsync(prompt.AsMemory(), run.Token);
                 process.StandardInput.Close();
+                timing?.Mark("Prompt sent");
             });
             try
             {
@@ -161,7 +167,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 catch (Exception ex) { throw new FatalRunnerException("Unable to reap Codex; stopping the service to prevent overlapping tasks.", ex); }
             }
         }
-        finally { lock (gate) current = null; }
+        finally { timing?.Mark("Runner stopped"); lock (gate) current = null; }
     }
 }
 
