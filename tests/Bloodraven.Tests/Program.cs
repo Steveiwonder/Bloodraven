@@ -118,7 +118,7 @@ static async Task WorkerTimings()
             return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
         }
         var outgoing = body.RootElement.GetProperty("text").GetString()!;
-        if (outgoing.Contains("Working"))
+        if (outgoing.StartsWith("Working"))
         {
             // Reproduce completion while the working notice is still in flight.
             for (var i = 0; i < 100 && !(await journal.SnapshotAsync(token)).Replies.Any(r => r.TimingKind == "Final"); i++)
