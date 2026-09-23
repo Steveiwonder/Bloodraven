@@ -7,6 +7,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("timing reports measure stages, survive storage and bound retention", TimingReports),
+    ("timings command measures prompt through final Telegram acceptance", WorkerTimings),
     ("model catalogue paginates and menus bind conversations", CatalogueMenus),
     ("tables become readable Telegram sections", Tables),
     ("model settings persist per conversation and pin scheduled jobs", ModelPreferences),
@@ -50,6 +52,77 @@ static async Task Throws<T>(Func<Task> action) where T : Exception
     try { await action(); }
     catch (T) { return; }
     throw new Exception($"Expected {typeof(T).Name}");
+}
+static async Task TimingReports()
+{
+    using var fixture = new Fixture();
+    var now = DateTimeOffset.UtcNow;
+    var trace = new TaskTimings(new TimingReport(1, 123, "default", now, now.ToUnixTimeSeconds(), "default", "default", "exec", "Running", []));
+    var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
+    await runner.RunAsync("private test prompt", default, timing: trace);
+    var names = trace.Snapshot().Points.Select(p => p.Name).ToArray();
+    foreach (var name in new[] { "New session", "Process started", "First event", "Prompt sent", "Final answer", "Runner stopped" }) Assert(names.Contains(name), name);
+    await runner.RunAsync("resume", default, timing: trace);
+    Assert(trace.Snapshot().Points.Any(p => p.Name == "Resuming session"));
+    await runner.RunAsync("approved", default, approve: (_, _, _) => Task.FromResult(false), timing: trace);
+    Assert(trace.Snapshot().Points.Any(p => p.Name == "Initialized"));
+    trace.Delivery(1100, 80, false); trace.Delivery(100, 90, true); trace.Approval(500);
+    trace.Mark("Delivered"); trace.Status("Completed; delivered");
+    var report = trace.Snapshot();
+    Assert(report.Attempts == 2 && report.Parts == 1 && report.SendWaitMs == 1200 && report.SendHttpMs == 170);
+    var text = TaskTimings.Format(report);
+    Assert(text.Contains("1.200 s") && text.Contains("170 ms") && text.Contains("1-second precision") && !text.Contains("private test prompt"));
+    var journal = new Journal(fixture.Options); await journal.InitializeAsync(default);
+    await journal.ChangeAsync(d => TaskTimings.Save(d, report), default);
+    var restored = new Journal(fixture.Options); await restored.InitializeAsync(default);
+    Assert((await restored.SnapshotAsync(default)).Timings.Single().Points.Length == report.Points.Length);
+    var data = new JournalData(); data.Jobs.Add(new Job(1, 123, "pending"));
+    for (var i = 1; i <= 70; i++) TaskTimings.Save(data, report with { Id = i, Received = now.AddSeconds(i) });
+    Assert(data.Timings.Count == 51 && data.Timings.Any(t => t.Id == 1));
+    Assert(JsonSerializer.Deserialize<JournalData>("{}")!.Timings.Count == 0);
+}
+static async Task WorkerTimings()
+{
+    using var fixture = new Fixture();
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+    var journal = new Journal(fixture.Options);
+    var replies = new List<string>();
+    var date = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    using var http = new HttpClient(new Handler(async (request, token) =>
+    {
+        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
+        {
+            await Task.Delay(20, token);
+            var offset = body.RootElement.GetProperty("offset").GetInt64();
+            var done = (await journal.SnapshotAsync(token)).Timings.Any(t => t.Points.Any(p => p.Name == "Delivered"));
+            object Update(int id, string text, int user = 123) => new { update_id = id, message = new { date, from = new { id = user }, chat = new { id = 123, type = "private" }, text } };
+            object[] updates = offset == 0 ? [Update(1, "hello timing test")] : offset == 2 && done ? [Update(2, "/timings", 999), Update(3, "/timings")] : [];
+            return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
+        }
+        lock (replies) replies.Add(body.RootElement.GetProperty("text").GetString()!);
+        return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
+    }));
+    var sessions = new SessionStore(fixture.Options);
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), new CodexRunner(fixture.Options, sessions), sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+    await worker.StartAsync(default);
+    try
+    {
+        for (var i = 0; i < 500; i++)
+        {
+            lock (replies) { if (replies.Any(t => t.Contains("Telegram accepted final reply"))) break; }
+            await Task.Delay(30);
+        }
+        var state = await journal.SnapshotAsync(default);
+        var report = state.Timings.Single();
+        Assert(report.TelegramDate == date && report.Id == 1 && report.Parts == 1 && report.Attempts == 1);
+        Assert(report.Status == "Completed; delivered" && report.SendWaitMs > 0);
+        foreach (var name in new[] { "Received", "Queued", "Started", "Attachments ready", "Process started", "Final answer", "Reply ready", "Delivery started", "Delivered" })
+            Assert(report.Points.Any(p => p.Name == name), name);
+        lock (replies) Assert(replies.Count(t => t.Contains("Timings · task")) == 1, "Timings command duplicated or authorization bypassed");
+        Assert(state.Jobs.Count == 0 && state.Offset == 4);
+    }
+    finally { await worker.StopAsync(default); }
 }
 static async Task ModelPreferences()
 {
