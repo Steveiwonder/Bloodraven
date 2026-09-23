@@ -253,35 +253,59 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             string result;
             string outcome = "Completed";
             string? document = null;
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            var stage = "dispatch";
+            using var logScope = logger.BeginScope(new Dictionary<string, object> { ["TaskId"] = job.Id, ["Conversation"] = job.Conversation });
+            logger.LogInformation("Task {Id} started: conversation={Conversation}, mode={Mode}, model={Model}, effort={Effort}, sandbox={Sandbox}, attachments={Attachments}.",
+                job.Id, job.Conversation, job.ApprovalRequired ? "app-server" : "exec", job.Settings?.Model ?? "default",
+                job.Settings?.Effort ?? "default", job.ApprovalRequired ? "read-only" : options.Sandbox, job.Attachments?.Length ?? 0);
             try
             {
                 switch (Command(job.Text))
                 {
                     case "/new":
+                        stage = "session-reset";
                         await sessions.ClearAsync(taskLifetime.Token, job.Conversation);
                         result = $"Started a fresh Codex conversation: {job.Conversation}."; break;
                     case "/file":
+                        stage = "file-export";
                         document = await attachments.ExportAsync(job.Text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1) ?? "", taskLifetime.Token);
                         result = $"File: {Path.GetFileName(document)}"; break;
-                    default: result = await RunWithProgressAsync(job, taskLifetime.Token); break;
+                    default: stage = "attachment-or-runner"; result = await RunWithProgressAsync(job, taskLifetime.Token); break;
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (OperationCanceledException) { outcome = "Cancelled or timed out"; result = "Task cancelled or timed out. It may have made changes; review them before retrying."; }
+            catch (OperationCanceledException)
+            {
+                logger.LogWarning("Task {Id} cancelled or timed out at {Stage} after {ElapsedMs}ms (limit {LimitSeconds}s).", job.Id, stage, elapsed.ElapsedMilliseconds, options.TaskTimeoutSeconds);
+                outcome = "Cancelled or timed out"; result = "Task cancelled or timed out. It may have made changes; review them before retrying.";
+            }
+            catch (CodexFailure ex)
+            {
+                logger.LogWarning("Task {Id} failed: stage={Stage}, session={SessionMode}, exit={ExitCode}, cause={Cause}, reason={Reason}, elapsedMs={ElapsedMs}.",
+                    job.Id, ex.Stage, ex.Resumed ? "resume" : "new", ex.ExitCode, ex.Cause, ex.Reason, elapsed.ElapsedMilliseconds);
+                outcome = "Failed";
+                result = $"Task {job.Id} failed: {ex.Reason}. Your conversation has been kept. Check the service logs for the failure stage and exit code.";
+            }
             catch (AppServerException ex)
             {
-                logger.LogWarning("Approval mode failed at {Stage}: {Reason} (RPC {Code}).", ex.Stage, ex.Reason, ex.RpcCode);
+                logger.LogWarning("Task {Id}: approval mode failed at {Stage}: {Reason} (RPC {Code}) after {ElapsedMs}ms.", job.Id, ex.Stage, ex.Reason, ex.RpcCode, elapsed.ElapsedMilliseconds);
                 outcome = "Failed";
                 result = ex.Message + "\nApproval mode remains enforced. Check the installed Codex version and service logs; no unrestricted retry was made.";
             }
-            catch (ArgumentException ex) { outcome = "Failed"; result = ex.Message; }
+            catch (ArgumentException ex)
+            {
+                logger.LogWarning("Task {Id} rejected at {Stage}: {ErrorType}; elapsedMs={ElapsedMs}.", job.Id, stage, ex.GetType().Name, elapsed.ElapsedMilliseconds);
+                outcome = "Failed"; result = ex.Message;
+            }
             catch (Exception ex) when (ex is not FatalRunnerException)
             {
-                logger.LogWarning("Task {Id} failed ({ErrorType}).", job.Id, ex.GetType().Name);
+                logger.LogWarning("Task {Id} failed at {Stage}: {ErrorType}, hresult={HResult}, elapsedMs={ElapsedMs}. Check local filesystem permissions, executable availability and session storage.", job.Id, stage, ex.GetType().Name, ex.HResult, elapsed.ElapsedMilliseconds);
                 outcome = "Failed";
-                result = "Task failed. Check Codex login, repository permissions, attachments and saved session locally; /new resets a broken session. Review changes before retrying.";
+                result = $"Task {job.Id} failed. Check service logs, Codex login, repository permissions and attachments. Your conversation has been kept. Review changes before retrying.";
             }
             finally { lock (taskGate) activeTask = null; }
+            logger.LogInformation("Task {Id} finished: {Outcome}, elapsedMs={ElapsedMs}.", job.Id, outcome, elapsed.ElapsedMilliseconds);
             if (outcome == "Failed" && job.Settings is { } selected && (selected.Model is not null || selected.Effort is not null))
                 result += $"\nSubmitted settings:\n{selected.Describe()}\nCheck that your Codex login and model support these choices; /model and /reasoning change settings for new tasks.";
             await journal.ChangeAsync(d =>
