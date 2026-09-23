@@ -286,8 +286,9 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     {
         while (!token.IsCancellationRequested)
         {
+            var changed = journal.Changed;
             var state = await journal.SnapshotAsync(token);
-            if (state.Jobs.Count == 0 || state.Replies.Count >= 100) { await Task.Delay(250, token); continue; }
+            if (!state.Jobs.Any(j => !j.Running) || state.Replies.Count >= 100) { await changed.WaitAsync(token); continue; }
             Job? job = null;
             await journal.ChangeAsync(d =>
             {
@@ -372,14 +373,16 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     TaskTimings.Save(d, trace.Snapshot());
                 }
                 var current = d.Jobs.FirstOrDefault(j => j.Id == job.Id);
-                if (current?.ProgressMessageId is > 0)
-                    d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, $"{outcome} · {job.Conversation}", EditMessageId: current.ProgressMessageId));
                 d.Jobs.RemoveAll(j => j.Id == job.Id);
                 d.Outcomes.Add(new TaskOutcome(job.Id, job.Conversation, outcome, DateTimeOffset.UtcNow));
                 if (d.Outcomes.Count > 50) d.Outcomes.RemoveRange(0, d.Outcomes.Count - 50);
                 d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId,
                     job.Conversation == "default" ? result : $"Conversation: {job.Conversation}\n\n{result}", DocumentPath: document,
                     TimingJobId: job.Id, TimingKind: "Final"));
+                // The cosmetic status edit must not consume the next send slot
+                // ahead of the answer (including all parts of a long answer).
+                if (current?.ProgressMessageId is > 0)
+                    d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, $"{outcome} · {job.Conversation}", EditMessageId: current.ProgressMessageId));
             }, token);
             attachments.Cleanup(job.Id);
         }
@@ -389,8 +392,9 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     {
         while (!token.IsCancellationRequested)
         {
+            var changed = journal.Changed;
             var reply = (await journal.SnapshotAsync(token)).Replies.FirstOrDefault();
-            if (reply is null) { await Task.Delay(250, token); continue; }
+            if (reply is null) { await changed.WaitAsync(token); continue; }
             TaskTimings? timing = null;
             if (reply.TimingJobId is { } timingId) timings.TryGetValue(timingId, out timing);
             if (reply.TimingKind == "Final") timing?.Mark("Delivery started", first: true);
@@ -420,7 +424,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                         else
                         {
                             var outcome = d.Outcomes.LastOrDefault(o => o.Id == jobId);
-                            d.Replies.Insert(0, new Reply(Guid.NewGuid().ToString("N"), reply.ChatId,
+                            d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), reply.ChatId,
                                 $"{outcome?.Status ?? "Finished"} · {outcome?.Conversation ?? "default"}", EditMessageId: id));
                         }
                     }

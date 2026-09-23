@@ -25,6 +25,8 @@ Bloodraven stores no personal configuration in Git. Its installer writes secrets
 
 ## Find out where a reply is slow
 
+Version 0.3.7 sends the final answer before editing its progress message to Completed. Queue workers wake on durable journal changes instead of polling every 250 ms. This removes the extra pacing interval caused by the completion edit and idle polling delays; Telegram rate-limit backoff and send pacing still apply. Bloodraven still waits for Codex to exit successfully before delivering the answer, so a late CLI failure is not reported as success.
+
 Version 0.3.6 automatically records timing checkpoints for each incoming prompt. Send your prompt, wait for the reply, then send `/timings`. It shows the latest task in the current conversation. You can also inspect a specific task with `/timings TASK_ID`, or request timings while a task is still running.
 
 The report includes Telegram's original timestamp, queue wait, attachment handling, Codex process startup, prompt submission, final answer event, runner cleanup, reply queue wait, and final delivery. Telegram pacing/lock waits and send requests are measured separately, including retries and multipart replies. Approval waits are included when applicable. A timeline, model/effort settings, execution mode and Bloodraven version make reports useful for troubleshooting. Send the report when reporting a slow response.

@@ -9,6 +9,7 @@ var tests = new (string Name, Func<Task> Run)[]
 {
     ("timing reports measure stages, survive storage and bound retention", TimingReports),
     ("timings command measures prompt through final Telegram acceptance", WorkerTimings),
+    ("journal notifications wake all readers after commit without lost wakeups", JournalNotifications),
     ("model catalogue paginates and menus bind conversations", CatalogueMenus),
     ("tables become readable Telegram sections", Tables),
     ("model settings persist per conversation and pin scheduled jobs", ModelPreferences),
@@ -81,6 +82,21 @@ static async Task TimingReports()
     Assert(data.Timings.Count == 51 && data.Timings.Any(t => t.Id == 1));
     Assert(JsonSerializer.Deserialize<JournalData>("{}")!.Timings.Count == 0);
 }
+static async Task JournalNotifications()
+{
+    using var fixture = new Fixture();
+    var journal = new Journal(fixture.Options); await journal.InitializeAsync(default);
+    var consumer = journal.Changed; var delivery = journal.Changed;
+    Assert(!consumer.IsCompleted && !delivery.IsCompleted);
+    Assert((await journal.SnapshotAsync(default)).Jobs.Count == 0);
+    // Commit before awaiting: both readers must observe the wakeup anyway.
+    await journal.ChangeAsync(d => d.Jobs.Add(new Job(1, 123, "test")), default);
+    await Task.WhenAll(consumer, delivery).WaitAsync(TimeSpan.FromSeconds(1));
+    Assert((await journal.SnapshotAsync(default)).Jobs.Count == 1);
+    Assert(!journal.Changed.IsCompleted);
+    using var stop = new CancellationTokenSource(); stop.Cancel();
+    await Throws<OperationCanceledException>(() => journal.Changed.WaitAsync(stop.Token));
+}
 static async Task WorkerTimings()
 {
     using var fixture = new Fixture();
@@ -102,6 +118,13 @@ static async Task WorkerTimings()
             return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
         }
         var outgoing = body.RootElement.GetProperty("text").GetString()!;
+        if (outgoing.StartsWith("Working"))
+        {
+            // Reproduce completion while the working notice is still in flight.
+            for (var i = 0; i < 100 && !(await journal.SnapshotAsync(token)).Replies.Any(r => r.TimingKind == "Final"); i++)
+                await Task.Delay(10, token);
+            Assert((await journal.SnapshotAsync(token)).Replies.Any(r => r.TimingKind == "Final"));
+        }
         if (outgoing.Contains("hello timing test") && Interlocked.Increment(ref finalAttempts) == 1)
             return Response(429, "{\"ok\":false,\"parameters\":{\"retry_after\":1}}");
         lock (replies) replies.Add(outgoing);
@@ -123,7 +146,13 @@ static async Task WorkerTimings()
         Assert(report.Status == "Completed; delivered" && report.SendWaitMs > 0);
         foreach (var name in new[] { "Received", "Queued", "Started", "Attachments ready", "Process started", "Final answer", "Reply ready", "Delivery started", "Delivered" })
             Assert(report.Points.Any(p => p.Name == name), name);
-        lock (replies) Assert(replies.Count(t => WebUtility.HtmlDecode(t).Contains("Timings · task")) == 1, "Timings command duplicated or authorization bypassed");
+        lock (replies)
+        {
+            Assert(replies.Count(t => WebUtility.HtmlDecode(t).Contains("Timings · task")) == 1, "Timings command duplicated or authorization bypassed");
+            var answer = replies.FindIndex(t => t.Contains("hello timing test"));
+            var completed = replies.FindIndex(t => t.StartsWith("Completed"));
+            Assert(answer >= 0 && completed > answer, "Late working notice inserted its completion edit ahead of the answer");
+        }
         Assert(state.Jobs.Count == 0 && state.Offset == 4);
     }
     finally { await worker.StopAsync(default); }
@@ -317,8 +346,10 @@ static async Task FailedWrite()
     var journal = new Journal(fixture.Options);
     await journal.InitializeAsync(default);
     Directory.CreateDirectory(Path.Combine(fixture.Options.StateDirectory, "journal.json.tmp"));
+    var changed = journal.Changed;
     await Throws<UnauthorizedAccessException>(() => journal.ChangeAsync(d => d.Offset = 99, default));
     Assert((await journal.SnapshotAsync(default)).Offset == 0);
+    Assert(!changed.IsCompleted, "Failed persistence must not notify readers");
 }
 static async Task Bounded()
 {
@@ -599,17 +630,17 @@ static async Task WorkerProgress()
         await journal.ChangeAsync(d => d.Jobs.Add(new Job(1, 123, "test progress")), default);
         for (var i = 0; i < 400; i++)
         {
-            lock (delivered) { if (delivered.Any(t => t.Contains("Task complete"))) break; }
+            lock (delivered) { if (delivered.Count >= 4) break; }
             await Task.Delay(50);
         }
         lock (delivered)
         {
-            Assert(methods.SequenceEqual(new[] { "sendMessage", "editMessageText", "editMessageText", "sendMessage" }));
+            Assert(methods.SequenceEqual(new[] { "sendMessage", "editMessageText", "sendMessage", "editMessageText" }));
             Assert(delivered.Count == 4, string.Join(";", delivered));
             Assert(delivered[0].Contains("Working"));
             Assert(delivered[1].Contains("Still working") && delivered[1].Contains("A command finished"));
-            Assert(delivered[2].Contains("Completed"));
-            Assert(delivered[3].Contains("Task complete"));
+            Assert(delivered[2].Contains("Task complete"));
+            Assert(delivered[3].Contains("Completed"));
             Assert(delivered.Count(t => t.Contains("Task complete")) == 1, "Final answer delivered twice");
         }
         Assert(worker.ExecuteTask?.IsCompleted == false);
