@@ -17,7 +17,7 @@ public static class AppServerRunner
 {
     public static async Task<string> RunAsync(AppOptions options, SessionStore sessions, string conversation,
         string prompt, IReadOnlyList<string> images, Action<JsonElement>? progress,
-        Func<string, JsonElement, CancellationToken, Task<bool>> approve, CancellationToken token, ModelSettings? settings = null)
+        Func<string, JsonElement, CancellationToken, Task<bool>> approve, CancellationToken token, ModelSettings? settings = null, TaskTimings? timing = null)
     {
         var start = new ProcessStartInfo(options.CodexExecutable) {
             WorkingDirectory = options.WorkingDirectory, UseShellExecute = false,
@@ -27,6 +27,7 @@ public static class AppServerRunner
         start.ArgumentList.Add("app-server");
         options.RemoveBridgeSecrets(start);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Codex app-server.");
+        timing?.Mark("Process started");
         var descendants = new System.Collections.Concurrent.ConcurrentBag<LinuxProcess>();
         using var cancel = token.Register(() =>
         {
@@ -86,6 +87,7 @@ public static class AppServerRunner
                     (!item.TryGetProperty("phase", out var phase) || phase.ValueKind == JsonValueKind.Null || phase.GetString() == "final_answer"))
                 {
                     final = text.GetString();
+                    timing?.Mark("Final answer");
                     if (final?.Length > 100_000) throw new InvalidDataException("Codex response exceeded its limit.");
                 }
                 if (kind is "commandExecution" or "fileChange" or "mcpToolCall")
@@ -114,8 +116,10 @@ public static class AppServerRunner
         {
             var id = ++sequence;
             await Write(new { id, method, @params = parameters });
+            if (method == "turn/start") timing?.Mark("Prompt sent");
             while (await lines.MoveNextAsync())
             {
+                timing?.Mark("First event", first: true);
                 using var json = JsonDocument.Parse(lines.Current);
                 var root = json.RootElement;
                 if (!root.TryGetProperty("method", out _) && root.TryGetProperty("id", out var responseId) &&
@@ -138,13 +142,16 @@ public static class AppServerRunner
         try
         {
             await Request("initialize", new { clientInfo = new { name = "bloodraven", version = BotWorker.Version } });
+            timing?.Mark("Initialized");
             await Write(new { method = "initialized", @params = new { } });
             var saved = await sessions.GetAsync(token, conversation, approved: true);
+            timing?.Mark(saved is null ? "New session" : "Resuming session");
             var thread = saved is null
                 ? await Request("thread/start", new { cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" })
                 : await Request("thread/resume", new { threadId = saved, cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" });
             var threadId = thread.GetProperty("thread").GetProperty("id").GetString()!;
             await sessions.SetAsync(threadId, token, conversation, approved: true);
+            timing?.Mark("Session ready");
             var input = new List<object> { new { type = "text", text = prompt, text_elements = Array.Empty<object>() } };
             input.AddRange(images.Select(path => (object)new { type = "localImage", path }));
             await Request("turn/start", new { threadId, input, cwd = options.WorkingDirectory,

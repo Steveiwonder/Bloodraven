@@ -120,7 +120,7 @@ public sealed record TelegramUpdate([property: JsonPropertyName("update_id")] lo
     [property: JsonPropertyName("callback_query")] TelegramCallback? Callback = null);
 public sealed record TelegramMessage(TelegramUser? From, TelegramChat Chat, string? Text,
     [property: JsonPropertyName("message_id")] long MessageId = 0, string? Caption = null,
-    TelegramDocument? Document = null, TelegramPhoto[]? Photo = null);
+    TelegramDocument? Document = null, TelegramPhoto[]? Photo = null, long Date = 0);
 public sealed record TelegramCallback(string Id, TelegramUser From, TelegramMessage? Message, string? Data);
 public sealed record InlineButton([property: JsonPropertyName("text")] string Text,
     [property: JsonPropertyName("callback_data")] string Data);
