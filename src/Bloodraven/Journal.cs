@@ -31,6 +31,10 @@ public sealed class JournalData
 public sealed class Journal(AppOptions options)
 {
     readonly SemaphoreSlim gate = new(1);
+    TaskCompletionSource changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    // Capture before inspecting the snapshot so a commit between inspection and
+    // waiting cannot be missed. All readers wake only after durable persistence.
+    public Task Changed => Volatile.Read(ref changed).Task;
     JournalData data = new();
     string FilePath => Path.Combine(options.StateDirectory, "journal.json");
     public async Task InitializeAsync(CancellationToken token)
@@ -72,6 +76,7 @@ public sealed class Journal(AppOptions options)
             change(next);
             await AtomicFile.WriteAsync(FilePath, JsonSerializer.Serialize(next), token);
             data = next;
+            Interlocked.Exchange(ref changed, new(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
         }
         finally { gate.Release(); }
     }
