@@ -36,7 +36,10 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         {
             if (approve is not null)
                 return await AppServerRunner.RunAsync(options, sessions, conversation, prompt, images ?? [], progress, approve, run.Token, settings);
-            var sessionId = await sessions.GetAsync(run.Token, conversation);
+            string? sessionId;
+            try { sessionId = await sessions.GetAsync(run.Token, conversation); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            { throw new CodexFailure("session-load", "could not read saved session; check session storage", false, cause: ex.GetType().Name); }
             var start = new ProcessStartInfo(options.CodexExecutable)
             {
                 WorkingDirectory = options.WorkingDirectory, UseShellExecute = false,
@@ -53,7 +56,13 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
             }
             foreach (var path in images ?? []) { start.ArgumentList.Add("--image"); start.ArgumentList.Add(path); }
             start.ArgumentList.Add("-"); // Prompts are stdin data, never CLI options.
-            using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Codex.");
+            Process StartProcess()
+            {
+                try { return Process.Start(start) ?? throw new InvalidOperationException(); }
+                catch (Exception ex)
+                { throw new CodexFailure("process-start", "could not launch Codex; check executable path and service permissions", sessionId is not null, cause: ex.GetType().Name); }
+            }
+            using var process = StartProcess();
             var descendants = new List<LinuxProcess>();
             using var registration = run.Token.Register(() =>
             {
@@ -90,7 +99,8 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                     var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
                     if (type == "thread.started" && root.TryGetProperty("thread_id", out var id))
                         await sessions.SetAsync(id.GetString()!, run.Token, conversation);
-                    if (type is "turn.failed" or "error") throw new InvalidOperationException("Codex reported a failed turn.");
+                    if (type is "turn.failed" or "error")
+                        throw new CodexFailure(type, CodexFailure.Classify(root.GetRawText()), sessionId is not null);
                     progress?.Invoke(root);
                     if (type == "item.completed" && root.TryGetProperty("item", out var item) &&
                         item.TryGetProperty("type", out var kind) && kind.GetString() == "agent_message" &&
@@ -101,8 +111,18 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                     }
                 }
             });
-            // Drain stderr without retaining or relaying potentially sensitive diagnostics.
-            var error = Guard(() => process.StandardError.BaseStream.CopyToAsync(Stream.Null, run.Token));
+            // Retain only a bounded private tail for classification; never log it.
+            var diagnostic = new StringBuilder();
+            var error = Guard(async () =>
+            {
+                var buffer = new char[2048];
+                int count;
+                while ((count = await process.StandardError.ReadAsync(buffer.AsMemory(), run.Token)) > 0)
+                {
+                    diagnostic.Append(buffer, 0, count);
+                    if (diagnostic.Length > 8192) diagnostic.Remove(0, diagnostic.Length - 8192);
+                }
+            });
             var input = Guard(async () =>
             {
                 await process.StandardInput.WriteAsync(prompt.AsMemory(), run.Token);
@@ -112,12 +132,16 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
             {
                 await Task.WhenAll(output, error, input, process.WaitForExitAsync(run.Token));
                 run.Token.ThrowIfCancellationRequested();
-                if (process.ExitCode != 0) throw new InvalidOperationException($"Codex exited with code {process.ExitCode}. Check Codex login and configuration locally.");
+                if (process.ExitCode != 0) throw new CodexFailure("process-exit", CodexFailure.Classify(diagnostic.ToString()), sessionId is not null, process.ExitCode);
                 return finalMessage ?? "Codex finished without a final message.";
             }
             catch when (streamFailure is not null)
             {
-                throw new InvalidOperationException("Codex output or session persistence failed. Review the repository before retrying.");
+                if (streamFailure is CodexFailure failure) throw failure;
+                throw new CodexFailure("output-or-session-save", streamFailure is JsonException ? "invalid JSON from Codex"
+                    : streamFailure is InvalidDataException ? "output exceeded limits or session data was invalid"
+                    : "stream I/O or session persistence failed", sessionId is not null,
+                    process.HasExited ? process.ExitCode : null, streamFailure.GetType().Name);
             }
             finally
             {

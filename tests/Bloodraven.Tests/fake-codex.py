@@ -88,6 +88,12 @@ elif mode == "oversized":
 elif mode == "failure":
     print("private stderr details", file=sys.stderr)
     sys.exit(2)
+elif mode == "cli-rejected":
+    print("unexpected argument '--sandbox'; private stderr details test-secret", file=sys.stderr)
+    sys.exit(2)
+elif mode == "turn-failed":
+    print(json.dumps({"type": "turn.failed", "error": {"message": "usage limit reached: private stderr details test-secret"}}), flush=True)
+    time.sleep(2)
 else:
     print(json.dumps({"type": "thread.started", "thread_id": "11111111-1111-1111-1111-111111111111"}))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({

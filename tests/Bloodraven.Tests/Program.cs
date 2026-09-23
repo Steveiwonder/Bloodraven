@@ -296,6 +296,25 @@ static async Task RunnerFailures()
         await Throws<InvalidOperationException>(() => runner.RunAsync("test", default));
         Assert(!runner.IsRunning);
     }
+    var sessions = new SessionStore(fixture.Options);
+    await sessions.SetAsync("11111111-1111-1111-1111-111111111111", default);
+    foreach (var mode in new[] { "cli-rejected", "turn-failed", "failure" })
+    {
+        Environment.SetEnvironmentVariable("TEST_CODEX_MODE", mode);
+        try
+        {
+            await new CodexRunner(fixture.Options, sessions).RunAsync("private prompt", default);
+            throw new Exception("Expected Codex failure");
+        }
+        catch (CodexFailure ex)
+        {
+            Assert(ex.Resumed);
+            Assert(!ex.ToString().Contains("private stderr details") && !ex.ToString().Contains("private prompt") && !ex.ToString().Contains("test-secret"));
+            if (mode == "cli-rejected") Assert(ex.ExitCode == 2 && ex.Stage == "process-exit" && ex.Reason.StartsWith("CLI arguments rejected"));
+            if (mode == "turn-failed") Assert(ex.Stage == "turn.failed" && ex.Reason == "usage or rate limit reached");
+            if (mode == "failure") Assert(ex.ExitCode == 2 && ex.Reason.StartsWith("unclassified"));
+        }
+    }
 }
 static async Task HtmlFallback()
 {

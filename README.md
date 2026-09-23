@@ -1,5 +1,7 @@
 # Bloodraven
 
+Task diagnostics are available with `sudo journalctl -u bloodraven --since "15 minutes ago" --no-pager -n 100`. Version 0.3.5 logs task IDs, submitted settings, elapsed time, failure stages, new/resumed execution and available exit codes. Known CLI errors are classified into actionable reasons; unknown errors remain explicitly unclassified. Raw stderr, prompts, answers and credentials are not logged. A failed task keeps its saved conversation; use a separate `/conversation diagnostic` for testing instead of resetting your existing history.
+
 Bloodraven is a small, self-hosted Telegram interface for the OpenAI Codex CLI. It runs on your own Ubuntu machine, uses your existing Codex login, and requires no inbound ports or public web server.
 
 > [!WARNING]
