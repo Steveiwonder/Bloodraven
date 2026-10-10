@@ -5,6 +5,8 @@ No production prompts, credentials, or model calls are involved.
 """
 import copy
 import json
+import os
+import tempfile
 from pathlib import Path
 import queue
 import subprocess
@@ -22,6 +24,8 @@ def main(schema_directory, trace_file, executable):
         "thread/resume": "ThreadResumeParams.json",
         "turn/start": "TurnStartParams.json",
         "model/list": "ModelListParams.json",
+        "config/read": "ConfigReadParams.json",
+        "thread/fork": "ThreadForkParams.json",
     }
     seen = set()
     validators = {}
@@ -48,8 +52,8 @@ def main(schema_directory, trace_file, executable):
 
     # Exercise initialization and thread creation against the real binary, with
     # a deliberately unreachable local provider. Never start a model turn.
-    with subprocess.Popen([executable, "-c", 'model_reasoning_effort="high"', "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, text=True) as process:
+    with tempfile.TemporaryDirectory(prefix="bloodraven-protocol-") as codex_home, subprocess.Popen([executable, "-c", 'model_reasoning_effort="high"', "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True, env={**os.environ, "CODEX_HOME": codex_home}) as process:
         incoming = queue.Queue()
 
         def read():
@@ -75,7 +79,7 @@ def main(schema_directory, trace_file, executable):
             process.stdin.flush()
             start = copy.deepcopy(first["thread/start"])
             start["params"].update({
-                "cwd": str(Path.cwd()), "ephemeral": True,
+                "cwd": str(Path.cwd()), "ephemeral": False,
                 "model": "protocol-test", "modelProvider": "protocol_test",
                 "config": {"model_providers.protocol_test": {
                     "name": "Offline protocol test", "base_url": "http://127.0.0.1:1/v1",
@@ -87,6 +91,21 @@ def main(schema_directory, trace_file, executable):
             assert result["reasoningEffort"] == "high", "Reasoning config override was not applied"
             assert result["approvalPolicy"] == "untrusted", "Approval policy was not applied"
             assert result["sandbox"]["type"] == "readOnly", "Read-only sandbox was not applied"
+            config_read = copy.deepcopy(first["config/read"])
+            config_read["id"] = 100
+            config_read["params"]["cwd"] = str(Path.cwd())
+            assert "config" in request(config_read)
+            fork = copy.deepcopy(first["thread/fork"])
+            fork["id"] = 101
+            fork["params"].update({"threadId": result["thread"]["id"], "cwd": str(Path.cwd())})
+            # The production override must also survive real config parsing.
+            fork["params"]["config"].update(start["params"]["config"])
+            fork["params"].update({"model": "protocol-test", "modelProvider": "protocol_test"})
+            forked = request(fork)
+            assert forked["thread"]["id"] != result["thread"]["id"]
+            assert forked["sandbox"]["type"] == "readOnly"
+            assert forked["approvalPolicy"] == "untrusted"
+            print("PASS real Codex creates a separate read-only BTW fork without a model call", flush=True)
             print("PASS real Codex initializes and creates an approval-mode thread without a model call", flush=True)
         finally:
             process.kill()
