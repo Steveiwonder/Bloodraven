@@ -313,3 +313,23 @@ Regression tests use fake Codex processes and a fake Telegram HTTP handler; they
 [MIT](LICENSE)
 
 /Bloodraven
+
+### Side questions during a task
+
+Send `/btw <question>` to get a separate **BTW** reply while the normal task continues.
+It uses the selected conversation's saved Codex history in a separate fork, with the
+selected model/effort. It never replaces the primary session or enters the main job queue.
+The context is a snapshot: activity not yet saved by Codex may be missing.
+
+One side question can be pending at a time. Questions are text-only and time out after
+five minutes (or the configured task timeout, if shorter). `/cancel` still targets only
+the main task. Side questions have read-only filesystem access, no network access from
+shell tools, disabled MCP servers/apps, and all approval requests are declined. They
+are instructed to answer without performing actions. They use your existing Codex login
+and consume model usage as a separate turn. No separate API key is required.
+
+This requires Codex app-server support for `config/read` and `thread/fork`. An unsupported
+CLI returns a BTW error without resuming or resetting the primary conversation. Pending
+questions and replies are durable; a running question interrupted by service restart is
+reported as interrupted rather than replayed. Upgrade the service only when current work
+has finished.
