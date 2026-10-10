@@ -175,7 +175,9 @@ public static class AppServerRunner
                     overrides["mcp_servers"] = disabledServers;
                 }
                 var fork = await Request("thread/fork", new {
-                    threadId = sideSession, cwd = options.WorkingDirectory,
+                    // Keep inherited context in Codex, but do not return its entire
+                    // history as one JSON line; only the fork ID is needed here.
+                    threadId = sideSession, cwd = options.WorkingDirectory, excludeTurns = true,
                     approvalPolicy = "untrusted", sandbox = "read-only", config = overrides,
                     developerInstructions = "Answer only the user's BTW side question using the inherited conversation as context. " +
                         "The original task is still running separately. Do not continue it, change files, execute commands, " +
