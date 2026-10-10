@@ -110,9 +110,6 @@ def main(schema_directory, trace_file, executable):
             fork["params"].update({"threadId": result["thread"]["id"], "cwd": str(Path.cwd())})
             # The production override must also survive real config parsing.
             fork["params"]["config"].update(start["params"]["config"])
-            # Supply the fake trace server's definition; production config already
-            # contains definitions for the servers that config/read enumerates.
-            fork["params"]["config"]['mcp_servers."external.test".command'] = "false"
             fork["params"].update({"model": "protocol-test", "modelProvider": "protocol_test"})
             forked = request(fork)
             assert forked["thread"]["id"] != result["thread"]["id"]
