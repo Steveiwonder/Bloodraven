@@ -84,6 +84,7 @@ def main(schema_directory, trace_file, executable):
                 "config": {"model_providers.protocol_test": {
                     "name": "Offline protocol test", "base_url": "http://127.0.0.1:1/v1",
                     "wire_api": "responses", "requires_openai_auth": False,
+                    "request_max_retries": 0, "stream_max_retries": 0,
                 }},
             })
             result = request(start)
@@ -91,6 +92,19 @@ def main(schema_directory, trace_file, executable):
             assert result["reasoningEffort"] == "high", "Reasoning config override was not applied"
             assert result["approvalPolicy"] == "untrusted", "Approval policy was not applied"
             assert result["sandbox"]["type"] == "readOnly", "Read-only sandbox was not applied"
+            # Codex persists rollouts lazily on the first turn, not thread/start.
+            # The loopback provider cannot reach a model; its failed turn creates
+            # real saved history so the fork exercises the production path.
+            seed = copy.deepcopy(first["turn/start"])
+            seed["id"] = 99
+            seed["params"]["threadId"] = result["thread"]["id"]
+            request(seed)
+            while True:
+                event = incoming.get(timeout=30)
+                assert event is not None, "Real app-server disconnected during fixture turn"
+                if event.get("method") == "turn/completed":
+                    assert event["params"]["turn"]["status"] == "failed"
+                    break
             config_read = copy.deepcopy(first["config/read"])
             config_read["id"] = 100
             config_read["params"]["cwd"] = str(Path.cwd())
@@ -100,6 +114,9 @@ def main(schema_directory, trace_file, executable):
             fork["params"].update({"threadId": result["thread"]["id"], "cwd": str(Path.cwd())})
             # The production override must also survive real config parsing.
             fork["params"]["config"].update(start["params"]["config"])
+            # Supply the fake trace server's definition; production config already
+            # contains definitions for the servers that config/read enumerates.
+            fork["params"]["config"]['mcp_servers."external.test".command'] = "false"
             fork["params"].update({"model": "protocol-test", "modelProvider": "protocol_test"})
             forked = request(fork)
             assert forked["thread"]["id"] != result["thread"]["id"]
