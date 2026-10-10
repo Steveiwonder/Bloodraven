@@ -131,8 +131,14 @@ def main(schema_directory, trace_file, executable):
             # The production override must also survive real config parsing.
             fork["params"]["config"].update(start["params"]["config"])
             fork["params"].update({"model": "protocol-test", "modelProvider": "protocol_test"})
+            assert fork["params"]["excludeTurns"] is True
             forked = request(fork)
             assert forked["thread"]["id"] != result["thread"]["id"]
+            assert forked["thread"].get("turns", []) == []
+            history = request({"id": 102, "method": "thread/read", "params": {
+                "threadId": forked["thread"]["id"], "includeTurns": True,
+            }})
+            assert history["thread"]["turns"], "Metadata-only fork lost inherited context"
             assert forked["sandbox"]["type"] == "readOnly"
             assert forked["approvalPolicy"] == "untrusted"
             print("PASS real Codex creates a separate read-only BTW fork without a model call", flush=True)
