@@ -93,18 +93,15 @@ def main(schema_directory, trace_file, executable):
             assert result["approvalPolicy"] == "untrusted", "Approval policy was not applied"
             assert result["sandbox"]["type"] == "readOnly", "Read-only sandbox was not applied"
             # Codex persists rollouts lazily on the first turn, not thread/start.
-            # The loopback provider cannot reach a model; its failed turn creates
+            # The loopback provider cannot reach a model; its interrupted turn creates
             # real saved history so the fork exercises the production path.
             seed = copy.deepcopy(first["turn/start"])
             seed["id"] = 99
             seed["params"]["threadId"] = result["thread"]["id"]
-            request(seed)
-            while True:
-                event = incoming.get(timeout=30)
-                assert event is not None, "Real app-server disconnected during fixture turn"
-                if event.get("method") == "turn/completed":
-                    assert event["params"]["turn"]["status"] == "failed"
-                    break
+            seeded = request(seed)
+            request({"id": 98, "method": "turn/interrupt", "params": {
+                "threadId": result["thread"]["id"], "turnId": seeded["turn"]["id"],
+            }})
             config_read = copy.deepcopy(first["config/read"])
             config_read["id"] = 100
             config_read["params"]["cwd"] = str(Path.cwd())
