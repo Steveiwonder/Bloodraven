@@ -28,6 +28,19 @@ if "app-server" in sys.argv:
             continue
         if method == "initialize":
             send({"id": message["id"], "result": {}})
+        elif method == "config/read":
+            send({"id": message["id"], "result": {"config": {"mcp_servers": {"external.test": {"enabled": True, "command": "false"}}}}})
+        elif method == "thread/fork":
+            assert params["threadId"] in ("main-session", "approved-session")
+            assert params["sandbox"] == "read-only" and params["approvalPolicy"] == "untrusted"
+            assert params["config"]["mcp_servers"]["external.test"]["enabled"] is False
+            assert "features.apps=false" in sys.argv
+            assert "features.multi_agent=false" in sys.argv
+            assert "Do not continue it" in params["developerInstructions"]
+            if mode == "reject-fork":
+                send({"id": message["id"], "error": {"code": -32601, "message": "private details"}})
+            else:
+                send({"id": message["id"], "result": {"thread": {"id": "side-fork"}}})
         elif method == "model/list":
             assert params["includeHidden"] is False
             if mode == "catalogue-error":

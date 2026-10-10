@@ -7,6 +7,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("BTW forks preserve sessions, deny approvals and recover interrupted questions", SideQuestions),
+    ("BTW replies while main task runs and authenticates incoming questions", WorkerSideQuestions),
     ("timing reports measure stages, survive storage and bound retention", TimingReports),
     ("timings command measures prompt through final Telegram acceptance", WorkerTimings),
     ("journal notifications wake all readers after commit without lost wakeups", JournalNotifications),
@@ -53,6 +55,80 @@ static async Task Throws<T>(Func<Task> action) where T : Exception
     try { await action(); }
     catch (T) { return; }
     throw new Exception($"Expected {typeof(T).Name}");
+}
+static async Task SideQuestions()
+{
+    using var fixture = new Fixture();
+    var sessions = new SessionStore(fixture.Options);
+    await sessions.SetAsync("main-session", default);
+    await sessions.SetAsync("approved-session", default, approved: true);
+    foreach (var id in new[] { "main-session", "approved-session" })
+    {
+        var answer = await AppServerRunner.RunAsync(fixture.Options, sessions, "default", "What is happening?", [], null,
+            (_, _, _) => Task.FromResult(false), default, sideSession: id);
+        Assert(answer == "decline" && !File.Exists(Path.Combine(fixture.Root, "approved.txt")));
+        Assert(await sessions.GetAsync(default) == "main-session");
+        Assert(await sessions.GetAsync(default, approved: true) == "approved-session");
+    }
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "reject-fork");
+    await Throws<AppServerException>(() => AppServerRunner.RunAsync(fixture.Options, sessions, "default", "question", [], null,
+        (_, _, _) => Task.FromResult(false), default, sideSession: "main-session"));
+    Assert(await sessions.GetAsync(default) == "main-session");
+    var journal = new Journal(fixture.Options); await journal.InitializeAsync(default);
+    await journal.ChangeAsync(d => {
+        d.SideQuestions.Add(new SideQuestion(1, 123, "question", "default", "main-session", new(), true));
+        d.Jobs.Add(new Job(2, 123, "queued main"));
+    }, default);
+    var restarted = new Journal(fixture.Options); await restarted.InitializeAsync(default);
+    var state = await restarted.SnapshotAsync(default);
+    Assert(state.SideQuestions.Count == 0 && state.Jobs.Single().Id == 2);
+    Assert(state.Replies.Single().Text.Contains("Side question interrupted"));
+}
+static async Task WorkerSideQuestions()
+{
+    using var fixture = new Fixture();
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "sleep");
+    var pidFile = Path.Combine(fixture.Root, "main-pids");
+    Environment.SetEnvironmentVariable("TEST_PID_FILE", pidFile);
+    var journal = new Journal(fixture.Options);
+    var sessions = new SessionStore(fixture.Options);
+    await sessions.SetAsync("main-session", default);
+    var runner = new CodexRunner(fixture.Options, sessions);
+    var replies = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    using var http = new HttpClient(new Handler(async (request, token) =>
+    {
+        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
+        {
+            await Task.Delay(20, token);
+            var offset = body.RootElement.GetProperty("offset").GetInt64();
+            object Update(int id, string text, int user = 123) => new { update_id = id, message = new {
+                from = new { id = user }, chat = new { id = 123, type = "private" }, text } };
+            object[] updates = offset == 0 ? [Update(1, "long main task")] :
+                offset == 2 && File.Exists(pidFile) ? [Update(2, "/btw", 123), Update(3, "/btw forbidden", 999),
+                    Update(4, "/btw@bloodraven What is happening?"), Update(5, "/btw duplicate")] : [];
+            return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
+        }
+        if (body.RootElement.TryGetProperty("text", out var text)) replies.Enqueue(text.GetString()!);
+        return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
+    }));
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), runner, sessions, journal,
+        fixture.Options, NullLogger<BotWorker>.Instance);
+    await worker.StartAsync(default);
+    try
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        while (!replies.Any(r => r.Contains("decline"))) await Task.Delay(25, deadline.Token);
+        var state = await journal.SnapshotAsync(default);
+        Assert(runner.IsRunning && state.Jobs.Single().Id == 1 && state.Jobs.Single().Running);
+        Assert(state.SideQuestions.Count == 0 && state.Offset == 6);
+        Assert(replies.Count(r => r.Contains("decline")) == 1);
+        Assert(replies.Any(r => r.Contains("text only")) && replies.Any(r => r.Contains("already pending")));
+        Assert(await sessions.GetAsync(default) == "main-session");
+        Assert(worker.ExecuteTask?.IsCompleted == false);
+    }
+    finally { await worker.StopAsync(default); }
 }
 static async Task TimingReports()
 {

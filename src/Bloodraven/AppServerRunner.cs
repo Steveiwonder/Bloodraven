@@ -17,7 +17,7 @@ public static class AppServerRunner
 {
     public static async Task<string> RunAsync(AppOptions options, SessionStore sessions, string conversation,
         string prompt, IReadOnlyList<string> images, Action<JsonElement>? progress,
-        Func<string, JsonElement, CancellationToken, Task<bool>> approve, CancellationToken token, ModelSettings? settings = null, TaskTimings? timing = null)
+        Func<string, JsonElement, CancellationToken, Task<bool>> approve, CancellationToken token, ModelSettings? settings = null, TaskTimings? timing = null, string? sideSession = null)
     {
         var start = new ProcessStartInfo(options.CodexExecutable) {
             WorkingDirectory = options.WorkingDirectory, UseShellExecute = false,
@@ -25,6 +25,12 @@ public static class AppServerRunner
         };
         (settings ?? new()).AddArguments(start);
         start.ArgumentList.Add("app-server");
+        if (sideSession is not null)
+        {
+            // Disable integrations in this process only; never rewrite the user's config.
+            foreach (var feature in new[] { "apps", "multi_agent", "multi_agent_v2", "browser_use", "computer_use", "plugins", "shell_tool", "code_mode", "code_mode_host" })
+            { start.ArgumentList.Add("-c"); start.ArgumentList.Add($"features.{feature}=false"); }
+        }
         options.RemoveBridgeSecrets(start);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Codex app-server.");
         timing?.Mark("Process started");
@@ -144,13 +150,47 @@ public static class AppServerRunner
             await Request("initialize", new { clientInfo = new { name = "bloodraven", version = BotWorker.Version } });
             timing?.Mark("Initialized");
             await Write(new { method = "initialized", @params = new { } });
-            var saved = await sessions.GetAsync(token, conversation, approved: true);
-            timing?.Mark(saved is null ? "New session" : "Resuming session");
-            var thread = saved is null
-                ? await Request("thread/start", new { cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" })
-                : await Request("thread/resume", new { threadId = saved, cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" });
-            var threadId = thread.GetProperty("thread").GetProperty("id").GetString()!;
-            await sessions.SetAsync(threadId, token, conversation, approved: true);
+            string threadId;
+            if (sideSession is not null)
+            {
+                // Discover configured MCP servers so even auto-approved remote tools are disabled.
+                var configuration = await Request("config/read", new { includeLayers = false, cwd = options.WorkingDirectory });
+                var overrides = new Dictionary<string, object>();
+                if (configuration.GetProperty("config").TryGetProperty("mcp_servers", out var servers) && servers.ValueKind == JsonValueKind.Object)
+                {
+                    var disabledServers = new Dictionary<string, object>();
+                    foreach (var server in servers.EnumerateObject())
+                    {
+                        var definition = JsonSerializer.Deserialize<Dictionary<string, object?>>(server.Value.GetRawText())!;
+                        definition["enabled"] = false;
+                        disabledServers[server.Name] = definition;
+                    }
+                    // Override the structured table: dotted keys split server names
+                    // containing dots, even when those names are TOML-quoted.
+                    overrides["mcp_servers"] = disabledServers;
+                }
+                var fork = await Request("thread/fork", new {
+                    threadId = sideSession, cwd = options.WorkingDirectory,
+                    approvalPolicy = "untrusted", sandbox = "read-only", config = overrides,
+                    developerInstructions = "Answer only the user's BTW side question using the inherited conversation as context. " +
+                        "The original task is still running separately. Do not continue it, change files, execute commands, " +
+                        "use external integrations, delegate work, or perform actions. Give a concise answer; " +
+                        "be explicit when the saved context does not contain the current status."
+                });
+                threadId = fork.GetProperty("thread").GetProperty("id").GetString()!;
+                if (threadId == sideSession) throw new AppServerException("thread/fork", "Codex did not create a separate thread");
+                // Deliberately do not persist the fork as the conversation's active session.
+            }
+            else
+            {
+                var saved = await sessions.GetAsync(token, conversation, approved: true);
+                timing?.Mark(saved is null ? "New session" : "Resuming session");
+                var thread = saved is null
+                    ? await Request("thread/start", new { cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" })
+                    : await Request("thread/resume", new { threadId = saved, cwd = options.WorkingDirectory, approvalPolicy = "untrusted", sandbox = "read-only" });
+                threadId = thread.GetProperty("thread").GetProperty("id").GetString()!;
+                await sessions.SetAsync(threadId, token, conversation, approved: true);
+            }
             timing?.Mark("Session ready");
             var input = new List<object> { new { type = "text", text = prompt, text_elements = Array.Empty<object>() } };
             input.AddRange(images.Select(path => (object)new { type = "localImage", path }));
