@@ -434,7 +434,11 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             catch (OperationCanceledException) { answer = "Side question timed out. The main task has not been cancelled."; }
             catch (Exception ex) when (ex is not FatalRunnerException)
             {
-                logger.LogWarning("BTW {Id} failed: {ErrorType}.", question.Id, ex.GetType().Name);
+                if (ex is AppServerException protocol)
+                    logger.LogWarning("BTW {Id} failed at {Stage}: {Reason} (RPC {RpcCode}).",
+                        question.Id, protocol.Stage, protocol.Reason, protocol.RpcCode);
+                else
+                    logger.LogWarning("BTW {Id} failed: {ErrorType}.", question.Id, ex.GetType().Name);
                 answer = "Could not answer the side question. Check Codex app-server/fork compatibility and login. Your main conversation has been kept.";
             }
             await journal.ChangeAsync(d =>
