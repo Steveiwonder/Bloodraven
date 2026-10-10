@@ -29,11 +29,11 @@ if "app-server" in sys.argv:
         if method == "initialize":
             send({"id": message["id"], "result": {}})
         elif method == "config/read":
-            send({"id": message["id"], "result": {"config": {"mcp_servers": {"external.test": {"enabled": True}}}}})
+            send({"id": message["id"], "result": {"config": {"mcp_servers": {"external.test": {"enabled": True, "command": "false"}}}}})
         elif method == "thread/fork":
             assert params["threadId"] in ("main-session", "approved-session")
             assert params["sandbox"] == "read-only" and params["approvalPolicy"] == "untrusted"
-            assert params["config"]['mcp_servers."external.test".enabled'] is False
+            assert params["config"]["mcp_servers"]["external.test"]["enabled"] is False
             assert "features.apps=false" in sys.argv
             assert "features.multi_agent=false" in sys.argv
             assert "Do not continue it" in params["developerInstructions"]
