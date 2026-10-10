@@ -161,7 +161,12 @@ public static class AppServerRunner
                     var disabledServers = new Dictionary<string, object>();
                     foreach (var server in servers.EnumerateObject())
                     {
-                        var definition = JsonSerializer.Deserialize<Dictionary<string, object?>>(server.Value.GetRawText())!;
+                        // config/read emits absent optional settings as JSON null. Codex's
+                        // JSON-to-TOML override conversion turns null into an empty string,
+                        // which breaks numeric settings such as tool_timeout_sec.
+                        var definition = server.Value.EnumerateObject()
+                            .Where(p => p.Value.ValueKind != JsonValueKind.Null)
+                            .ToDictionary(p => p.Name, p => (object)p.Value.Clone());
                         definition["enabled"] = false;
                         disabledServers[server.Name] = definition;
                     }

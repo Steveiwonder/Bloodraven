@@ -12,6 +12,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 
 import jsonschema
 
@@ -99,8 +100,27 @@ def main(schema_directory, trace_file, executable):
             seed["id"] = 99
             seed["params"]["threadId"] = result["thread"]["id"]
             request(seed)
-            # Forking supports a live source turn as well as a completed one;
-            # do not depend on notification/response ordering or retry timing.
+            # The turn acknowledgement can precede the asynchronous rollout write.
+            # Wait for a complete metadata record before forking this new fixture.
+            deadline = time.monotonic() + 10
+            while True:
+                ready = False
+                for path in Path(codex_home).rglob(f"*{result['thread']['id']}*.jsonl"):
+                    with path.open() as rollout:
+                        line = rollout.readline()
+                    if line.endswith("\n"):
+                        try:
+                            ready = json.loads(line).get("type") == "session_meta"
+                        except json.JSONDecodeError:
+                            pass
+                    if ready:
+                        break
+                if ready:
+                    break
+                assert time.monotonic() < deadline, "Codex did not persist the test session metadata"
+                time.sleep(0.05)
+            # The source turn may still be running; do not depend on completion
+            # notifications arriving before or after the turn acknowledgement.
             config_read = copy.deepcopy(first["config/read"])
             config_read["id"] = 100
             config_read["params"]["cwd"] = str(Path.cwd())
