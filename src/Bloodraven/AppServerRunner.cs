@@ -157,8 +157,18 @@ public static class AppServerRunner
                 var configuration = await Request("config/read", new { includeLayers = false, cwd = options.WorkingDirectory });
                 var overrides = new Dictionary<string, object>();
                 if (configuration.GetProperty("config").TryGetProperty("mcp_servers", out var servers) && servers.ValueKind == JsonValueKind.Object)
+                {
+                    var disabledServers = new Dictionary<string, object>();
                     foreach (var server in servers.EnumerateObject())
-                        overrides[$"mcp_servers.{JsonSerializer.Serialize(server.Name)}.enabled"] = false;
+                    {
+                        var definition = JsonSerializer.Deserialize<Dictionary<string, object?>>(server.Value.GetRawText())!;
+                        definition["enabled"] = false;
+                        disabledServers[server.Name] = definition;
+                    }
+                    // Override the structured table: dotted keys split server names
+                    // containing dots, even when those names are TOML-quoted.
+                    overrides["mcp_servers"] = disabledServers;
+                }
                 var fork = await Request("thread/fork", new {
                     threadId = sideSession, cwd = options.WorkingDirectory,
                     approvalPolicy = "untrusted", sandbox = "read-only", config = overrides,
