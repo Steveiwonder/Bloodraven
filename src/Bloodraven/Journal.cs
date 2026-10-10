@@ -6,6 +6,8 @@ public sealed record Attachment(string FileId, string Name, bool Image, long Siz
 public sealed record Job(long Id, long ChatId, string Text, bool Running = false,
     string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null,
     long? ProgressMessageId = null, bool ApprovalRequired = false, ModelSettings? Settings = null);
+public sealed record SideQuestion(long Id, long ChatId, string Question, string Conversation, string SessionId,
+    ModelSettings Settings, bool Running = false);
 public sealed record Reply(string Id, long ChatId, string Text, int Part = 0,
     InlineButton[][]? Buttons = null, long? EditMessageId = null, long? ProgressJobId = null, string? DocumentPath = null, bool Plain = false,
     long? TimingJobId = null, string? TimingKind = null);
@@ -16,6 +18,7 @@ public sealed class JournalData
 {
     public long Offset { get; set; }
     public List<Job> Jobs { get; set; } = [];
+    public List<SideQuestion> SideQuestions { get; set; } = [];
     public List<Reply> Replies { get; set; } = [];
     public string ActiveConversation { get; set; } = "default";
     public List<string> Conversations { get; set; } = ["default"];
@@ -58,6 +61,11 @@ public sealed class Journal(AppOptions options)
                 if (job.ProgressMessageId is > 0)
                     d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, "Interrupted by restart", EditMessageId: job.ProgressMessageId));
             }
+            foreach (var question in d.SideQuestions.Where(q => q.Running).ToArray())
+            {
+                AddReply(d, question.ChatId, $"BTW · {question.Conversation}\nSide question interrupted by restart. Send /btw again to retry.");
+                d.SideQuestions.Remove(question);
+            }
             if (d.Outcomes.Count > 50) d.Outcomes.RemoveRange(0, d.Outcomes.Count - 50);
         }, token);
     }
@@ -82,7 +90,7 @@ public sealed class Journal(AppOptions options)
     }
     // Records/strings are immutable; copying the lists avoids repeatedly serialising large replies just to inspect the queue.
     static JournalData Clone(JournalData value) => new() {
-        Offset = value.Offset, Jobs = [.. value.Jobs], Replies = [.. value.Replies],
+        Offset = value.Offset, Jobs = [.. value.Jobs], Replies = [.. value.Replies], SideQuestions = [.. value.SideQuestions],
         ActiveConversation = value.ActiveConversation, Conversations = [.. value.Conversations],
         Schedules = [.. value.Schedules], Outcomes = [.. value.Outcomes], Timings = [.. value.Timings], Approvals = value.Approvals,
         NextScheduledId = value.NextScheduledId, ModelSettings = new(value.ModelSettings)

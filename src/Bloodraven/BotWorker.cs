@@ -94,7 +94,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         }
         attachments.CleanupStale(await journal.SnapshotAsync(stoppingToken));
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        Task[] tasks = [PollAsync(lifetime.Token), ConsumeAsync(lifetime.Token), DeliverAsync(lifetime.Token), ScheduleAsync(lifetime.Token)];
+        Task[] tasks = [PollAsync(lifetime.Token), ConsumeAsync(lifetime.Token), DeliverAsync(lifetime.Token), ScheduleAsync(lifetime.Token), AnswerSideQuestionsAsync(lifetime.Token)];
         try { await Task.WhenAny(tasks); lifetime.Cancel(); await Task.WhenAll(tasks); }
         finally { lifetime.Cancel(); File.Delete(Path.Combine(options.StateDirectory, "ready")); }
     }
@@ -176,6 +176,12 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     }
                 }
                 var status = allowed && command is "/status" or "/health" ? await StatusAsync(state, command == "/health", token) : null;
+                string? sideSession = null;
+                if (allowed && error is null && command == "/btw")
+                {
+                    try { sideSession = await sessions.GetAsync(token, state.ActiveConversation, state.Approvals ?? options.ApprovalDefault); }
+                    catch (InvalidDataException) { error = "Cannot read this conversation's session. The main task has not been changed."; }
+                }
                 await journal.ChangeAsync(d =>
                 {
                     d.Offset = update.UpdateId + 1;
@@ -184,6 +190,23 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     if (error is not null) { Journal.AddReply(d, chat, error); return; }
                     if (menuRequested && catalogue is not null) { modelMenus.Show(d, chat, command == "/model", catalogue); return; }
                     if (text.Length > 16384) { Journal.AddReply(d, chat, "Message too large (maximum 16,384 characters)."); return; }
+                    if (command == "/btw")
+                    {
+                        var question = text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1)?.Trim();
+                        if (string.IsNullOrEmpty(question) || files.Length != 0)
+                            Journal.AddReply(d, chat, "Use /btw <question> (text only). The main task keeps running.");
+                        else if (sideSession is null)
+                            Journal.AddReply(d, chat, "No saved session yet for this conversation. Wait for the main task to start, then retry /btw.");
+                        else if (d.SideQuestions.Count != 0)
+                            Journal.AddReply(d, chat, "A BTW question is already pending. Wait for its answer before sending another.");
+                        else
+                        {
+                            d.SideQuestions.Add(new SideQuestion(update.UpdateId, chat, question, d.ActiveConversation,
+                                sideSession, ModelSettings.For(d, d.ActiveConversation)));
+                            Journal.AddReply(d, chat, $"BTW · {d.ActiveConversation}\nAnswering your side question; the main task continues.");
+                        }
+                        return;
+                    }
                     if (command == "/cancel") return;
                     if (status is not null) { Journal.AddReply(d, chat, status); return; }
                     if (command == "/timings")
@@ -385,6 +408,40 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId, $"{outcome} · {job.Conversation}", EditMessageId: current.ProgressMessageId));
             }, token);
             attachments.Cleanup(job.Id);
+        }
+    }
+
+    async Task AnswerSideQuestionsAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var changed = journal.Changed;
+            var state = await journal.SnapshotAsync(token);
+            if (state.SideQuestions.Count == 0 || state.Replies.Count >= 100)
+            { await changed.WaitAsync(token); continue; }
+            var question = state.SideQuestions[0];
+            await journal.ChangeAsync(d => d.SideQuestions[0] = question with { Running = true }, token);
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+            lifetime.CancelAfter(TimeSpan.FromSeconds(Math.Min(300, options.TaskTimeoutSeconds)));
+            string answer;
+            try
+            {
+                answer = await AppServerRunner.RunAsync(options, sessions, question.Conversation,
+                    question.Question, [], null, (_, _, _) => Task.FromResult(false), lifetime.Token,
+                    question.Settings, sideSession: question.SessionId);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (OperationCanceledException) { answer = "Side question timed out. The main task has not been cancelled."; }
+            catch (Exception ex) when (ex is not FatalRunnerException)
+            {
+                logger.LogWarning("BTW {Id} failed: {ErrorType}.", question.Id, ex.GetType().Name);
+                answer = "Could not answer the side question. Check Codex app-server/fork compatibility and login. Your main conversation has been kept.";
+            }
+            await journal.ChangeAsync(d =>
+            {
+                d.SideQuestions.RemoveAll(q => q.Id == question.Id);
+                Journal.AddReply(d, question.ChatId, $"BTW · {question.Conversation}\n\n{answer}");
+            }, token);
         }
     }
 
