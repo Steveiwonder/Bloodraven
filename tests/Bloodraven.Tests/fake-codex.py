@@ -42,7 +42,10 @@ if "app-server" in sys.argv:
             if mode == "reject-fork":
                 send({"id": message["id"], "error": {"code": -32601, "message": "private details"}})
             else:
-                send({"id": message["id"], "result": {"thread": {"id": "side-fork"}}})
+                # A long saved conversation exceeds the runner's line limit when
+                # hydrated into the fork response. Metadata-only forks still work.
+                turns = [] if params.get("excludeTurns") is True else [{"history": "x" * 1_100_000}]
+                send({"id": message["id"], "result": {"thread": {"id": "side-fork", "turns": turns}}})
         elif method == "model/list":
             assert params["includeHidden"] is False
             if mode == "catalogue-error":
