@@ -87,6 +87,13 @@ if "app-server" in sys.argv:
             send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
     sys.exit(0)
 prompt = sys.stdin.read()
+if mode == "concurrent":
+    print(json.dumps({"type": "thread.started", "thread_id": "main-session"}), flush=True)
+    open("started-" + prompt, "w").close()
+    while not os.path.exists("release-" + prompt):
+        time.sleep(0.02)
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Finished " + prompt}}), flush=True)
+    sys.exit(0)
 if mode == "progress":
     print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "id": "cmd1", "command": "docker inspect plex", "aggregated_output": "Container is healthy", "exit_code": 0}}), flush=True)
     # Reproduce a final answer arriving before slow process shutdown. A progress
