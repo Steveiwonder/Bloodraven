@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("delete removes only idle named conversation state and session links", DeleteConversation),
     ("conversation workers run concurrently and commands stay scoped", ConcurrentConversations),
     ("conversation approval policies and queues survive restart", ConversationRecovery),
     ("conversation worker failures cancel and drain siblings", ConversationFailure),
@@ -902,6 +903,53 @@ static async Task WorkerControls()
         Assert(worker.ExecuteTask?.IsCompleted == false);
     }
     finally { await worker.StopAsync(default); }
+}
+
+static async Task DeleteConversation()
+{
+    using var fixture = new Fixture();
+    var sessions = new SessionStore(fixture.Options);
+    var journal = new Journal(fixture.Options);
+    await journal.InitializeAsync(default);
+    await sessions.SetAsync("keep", default);
+    await sessions.SetAsync("old", default, "remove");
+    await sessions.SetAsync("old-approved", default, "remove", true);
+    await journal.ChangeAsync(d =>
+    {
+        d.Conversations.Add("remove");
+        d.ActiveConversation = "remove";
+        d.ModelSettings["remove"] = new ModelSettings("example", null);
+        d.ConversationApprovals["remove"] = true;
+        d.Jobs.Add(new Job(1, 123, "keep"));
+        d.Jobs.Add(new Job(2, 123, "busy", true, "remove"));
+        d.SideQuestions.Add(new SideQuestion(3, 123, "question", "remove", "old", new ModelSettings()));
+        d.Schedules.Add(new Schedule("s", 123, "prompt", "remove", "every 30m", DateTimeOffset.UtcNow));
+    }, default);
+    async Task Delete(string text) => await journal.ChangeWithAsync(d => BotCommands.DeleteAsync(d, 123, text, sessions, default), default);
+    foreach (var command in new[] { "/delete", "/delete ../escape", "/delete default", "/delete missing", "/delete remove" })
+        await Delete(command);
+    Assert((await journal.SnapshotAsync(default)).Jobs.Count == 2);
+    Assert(await sessions.GetAsync(default, "remove") == "old");
+    await journal.ChangeAsync(d =>
+    {
+        d.Jobs[1] = d.Jobs[1] with { Running = false };
+        d.SideQuestions[0] = d.SideQuestions[0] with { Running = true };
+    }, default);
+    await Delete("/delete remove");
+    Assert((await journal.SnapshotAsync(default)).Conversations.Contains("remove"), "Deleted running BTW");
+    await journal.ChangeAsync(d => d.SideQuestions[0] = d.SideQuestions[0] with { Running = false }, default);
+    await Delete("/delete remove");
+    var restored = new Journal(fixture.Options);
+    await restored.InitializeAsync(default);
+    var state = await restored.SnapshotAsync(default);
+    Assert(state.Conversations.SequenceEqual(new[] { "default" }) && state.ActiveConversation == "default");
+    Assert(state.Jobs.Count == 1 && state.Jobs[0].Id == 1);
+    Assert(state.SideQuestions.Count == 0 && state.Schedules.Count == 0);
+    Assert(!state.ModelSettings.ContainsKey("remove") && !state.ConversationApprovals.ContainsKey("remove"));
+    Assert(await sessions.GetAsync(default, "remove") is null && await sessions.GetAsync(default, "remove", true) is null);
+    Assert(await sessions.GetAsync(default) == "keep");
+    await journal.ChangeAsync(d => BotCommands.Apply(d, 123, "/conversation remove", false), default);
+    Assert(await sessions.GetAsync(default, "remove") is null, "Recreated conversation resumed deleted history");
 }
 
 static async Task ConversationsAndQueue()
