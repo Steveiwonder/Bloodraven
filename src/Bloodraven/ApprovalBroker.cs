@@ -6,34 +6,38 @@ namespace Bloodraven;
 public sealed class ApprovalBroker(Journal journal)
 {
     readonly ConcurrentDictionary<string, Pending> pending = new();
+
     sealed record Pending(long ChatId, string Conversation, TaskCompletionSource<bool> Answer);
     public int Count => pending.Count;
+
     public int CountFor(string conversation) => pending.Values.Count(p => p.Conversation == conversation);
 
-    public bool Decide(string nonce, long chatId, bool accept, string? conversation = null) =>
-        pending.TryGetValue(nonce, out var item) && item.ChatId == chatId && (conversation is null || item.Conversation == conversation) && item.Answer.TrySetResult(accept);
+    public bool Decide(string nonce, long chatId, bool accept, string? conversation = null) => pending.TryGetValue(nonce, out var item) && item.ChatId == chatId && (conversation is null || item.Conversation == conversation) && item.Answer.TrySetResult(accept);
 
     public async Task<bool> RequestAsync(long chatId, string conversation, string method, JsonElement details, CancellationToken token)
     {
         var nonce = Guid.NewGuid().ToString("N");
         var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
         pending[nonce] = new Pending(chatId, conversation, answer);
+
         try
         {
             // Do not truncate the proposed command: approval must describe the complete operation.
-            var description = JsonSerializer.Serialize(details, new JsonSerializerOptions {
-                WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            });
+            var description = JsonSerializer.Serialize(details, new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+
             if (description.Length > 2600)
             {
-                await journal.ChangeAsync(d => Journal.AddReply(d, chatId,
-                    "Approval declined: the proposed operation is too large to show completely in Telegram. Split the task into smaller operations."), token);
+                await journal.ChangeAsync(d => Journal.AddReply(d, chatId, "Approval declined: the proposed operation is too large to show completely in Telegram. Split the task into smaller operations."), token);
                 return false;
             }
-            await journal.ChangeAsync(d => d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chatId,
-                $"Approval required · {conversation}\n{method}\n\n{description}\n\nApprove this operation once? Expires in 5 minutes. Select this conversation before using /cancel.",
-                Buttons: [[new("Approve once", "approve:" + nonce), new("Decline", "decline:" + nonce)]], Plain: true)), token);
-            try { return await answer.Task.WaitAsync(TimeSpan.FromMinutes(5), token); }
+
+            await journal.ChangeAsync(d => d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chatId, $"Approval required · {conversation}\n{method}\n\n{description}\n\nApprove this operation once? Expires in 5 minutes. Select this conversation before using /cancel.", Buttons: [[new("Approve once", "approve:" + nonce), new("Decline", "decline:" + nonce)]], Plain: true)), token);
+
+            try
+            {
+                return await answer.Task.WaitAsync(TimeSpan.FromMinutes(5), token);
+            }
             catch (TimeoutException)
             {
                 await journal.ChangeAsync(d => Journal.AddReply(d, chatId, "Approval expired; the proposed operation was declined."), token);
@@ -44,8 +48,7 @@ public sealed class ApprovalBroker(Journal journal)
         {
             pending.TryRemove(nonce, out _);
             // An unsent prompt must not outlive the operation it could approve.
-            await journal.ChangeAsync(d => d.Replies.RemoveAll(r =>
-                r.Buttons?.SelectMany(row => row).Any(b => b.Data == "approve:" + nonce) == true), CancellationToken.None);
+            await journal.ChangeAsync(d => d.Replies.RemoveAll(r => r.Buttons?.SelectMany(row => row).Any(b => b.Data == "approve:" + nonce) == true), CancellationToken.None);
         }
     }
 }
