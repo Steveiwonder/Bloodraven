@@ -44,26 +44,55 @@ var tests = new (string Name, Func<Task> Run)[]
     ("progress tracks real command state and redacts excerpts", DetailedProgress),
 };
 var failures = 0;
+
 foreach (var test in tests)
 {
-    try { await test.Run(); Console.WriteLine($"PASS {test.Name}"); }
-    catch (Exception ex) { failures++; Console.WriteLine($"FAIL {test.Name}: {ex}"); }
+    try
+    {
+        await test.Run();
+        Console.WriteLine($"PASS {test.Name}");
+    }
+    catch (Exception ex)
+    {
+        failures++;
+        Console.WriteLine($"FAIL {test.Name}: {ex}");
+    }
 }
+
 Console.WriteLine($"{tests.Length - failures}/{tests.Length} regression tests passed.");
 return failures == 0 ? 0 : 1;
-
 static void Assert(bool condition, string message = "Assertion failed")
-{ if (!condition) throw new Exception(message); }
-static async Task Throws<T>(Func<Task> action) where T : Exception
 {
-    try { await action(); }
-    catch (T) { return; }
+    if (!condition)
+    {
+        throw new Exception(message);
+    }
+}
+
+static async Task Throws<T>(Func<Task> action)
+    where T : Exception
+{
+    try
+    {
+        await action();
+    }
+    catch (T)
+    {
+        return;
+    }
+
     throw new Exception($"Expected {typeof(T).Name}");
 }
+
 static async Task ConcurrentConversations()
 {
     using var fixture = new Fixture();
-    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+    {
+        await git.WaitForExitAsync();
+    }
+
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "concurrent");
     var journal = new Journal(fixture.Options);
     var sessions = new SessionStore(fixture.Options);
@@ -71,44 +100,90 @@ static async Task ConcurrentConversations()
     var updates = new System.Collections.Concurrent.ConcurrentQueue<object>();
     var sent = new System.Collections.Concurrent.ConcurrentQueue<string>();
     int nextId = 0;
+
     int Send(string text)
     {
         var id = ++nextId;
-        updates.Enqueue(new { update_id = id, message = new { from = new { id = 123 }, chat = new { id = 123, type = "private" }, text } });
+
+        updates.Enqueue(new
+        {
+            update_id = id,
+            message = new
+            {
+                from = new
+                {
+                    id = 123
+                },
+                chat = new
+                {
+                    id = 123,
+                    type = "private"
+                },
+                text
+            }
+        });
         return id;
     }
-    using var http = new HttpClient(new Handler(async (request, token) => {
+
+    using var http = new HttpClient(new Handler(async (request, token) =>
+    {
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+
         if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
         {
             await Task.Delay(20, token);
             var batch = new List<object>();
-            while (updates.TryDequeue(out var update)) batch.Add(update);
-            return Response(200, JsonSerializer.Serialize(new { ok = true, result = batch }));
+
+            while (updates.TryDequeue(out var update))
+            {
+                batch.Add(update);
+            }
+
+            return Response(200, JsonSerializer.Serialize(new
+            {
+                ok = true,
+                result = batch
+            }));
         }
-        if (body.RootElement.TryGetProperty("text", out var text)) sent.Enqueue(WebUtility.HtmlDecode(text.GetString()!));
+
+        if (body.RootElement.TryGetProperty("text", out var text))
+        {
+            sent.Enqueue(WebUtility.HtmlDecode(text.GetString()!));
+        }
+
         return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
     using var worker = new BotWorker(new TelegramClient(http, fixture.Options), runner, sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+
     async Task Wait(Func<JournalData, bool> condition)
     {
         while (!condition(await journal.SnapshotAsync(deadline.Token)))
         {
-            if (worker.ExecuteTask?.IsCompleted == true) await worker.ExecuteTask;
+            if (worker.ExecuteTask?.IsCompleted == true)
+            {
+                await worker.ExecuteTask;
+            }
+
             await Task.Delay(20, deadline.Token);
         }
     }
+
     bool Started(string name) => File.Exists(Path.Combine(fixture.Root, "started-" + name));
+
     bool Said(JournalData d, string text) => d.Replies.Any(r => r.Text.Contains(text)) || sent.Any(r => r.Contains(text));
+
     await worker.StartAsync(default);
+
     try
     {
         var a = Send("a-first");
         var aNext = Send("a-second");
+
         Send("/conversation other");
         var b = Send("b-first");
         var bNext = Send("b-second");
+
         await Wait(d => Started("a-first") && Started("b-first"));
         Assert(!Started("a-second") && !Started("b-second"), "Same-conversation jobs overlapped");
         await Throws<InvalidOperationException>(() => runner.RunAsync("duplicate", default));
@@ -136,15 +211,20 @@ static async Task ConcurrentConversations()
         Assert(!Started("a-second"));
         Assert((await journal.SnapshotAsync(default)).Outcomes.Count(o => o.Status == "Completed") == 2);
     }
-    finally { await worker.StopAsync(default); }
+    finally
+    {
+        await worker.StopAsync(default);
+    }
 }
 
 static async Task ConversationRecovery()
 {
     using var fixture = new Fixture();
     var journal = new Journal(fixture.Options);
+
     await journal.InitializeAsync(default);
-    await journal.ChangeAsync(d => {
+    await journal.ChangeAsync(d =>
+    {
         d.Approvals = true; // Existing installations inherit the legacy choice.
         d.Conversations.Add("other");
         d.ConversationApprovals["other"] = false;
@@ -154,14 +234,22 @@ static async Task ConversationRecovery()
         d.Jobs.Add(new Job(4, 123, "b-next", Conversation: "other"));
     }, default);
     var restarted = new Journal(fixture.Options);
+
     await restarted.InitializeAsync(default);
     var state = await restarted.SnapshotAsync(default);
+
     Assert(state.Jobs.Select(j => j.Id).SequenceEqual(new long[] { 2, 4 }));
     Assert(state.Jobs[0].ApprovalRequired && !state.Jobs[1].ApprovalRequired);
     Assert(state.Outcomes.Count == 2 && state.Outcomes.All(o => o.Status == "Interrupted by restart"));
     Assert(state.ApprovalFor("default", false) && !state.ApprovalFor("other", false));
-    for (var i = 0; i < 19; i++) state.Jobs.Add(new Job(10 + i, 123, "full"));
+
+    for (var i = 0; i < 19; i++)
+    {
+        state.Jobs.Add(new Job(10 + i, 123, "full"));
+    }
+
     var now = DateTimeOffset.UtcNow;
+
     state.Schedules.Add(new Schedule("a", 123, "scheduled", "default", "every 1m", now));
     state.Schedules.Add(new Schedule("b", 123, "scheduled", "other", "every 1m", now));
     Scheduling.EnqueueDue(state, now, false);
@@ -172,10 +260,12 @@ static async Task ConversationFailure()
 {
     using var fixture = new Fixture();
     var journal = new Journal(fixture.Options);
+
     await journal.InitializeAsync(default);
     await journal.ChangeAsync(d => d.Conversations.Add("other"), default);
     var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var stopped = false;
+
     async Task Consume(string name, CancellationToken token)
     {
         if (name == "default")
@@ -183,10 +273,19 @@ static async Task ConversationFailure()
             await started.Task.WaitAsync(token);
             throw new FatalRunnerException("test failure", new IOException());
         }
+
         started.SetResult();
-        try { await Task.Delay(Timeout.Infinite, token); }
-        finally { stopped = true; }
+
+        try
+        {
+            await Task.Delay(Timeout.Infinite, token);
+        }
+        finally
+        {
+            stopped = true;
+        }
     }
+
     await Throws<FatalRunnerException>(() => ConversationWorkers.RunAsync(journal, Consume, default).WaitAsync(TimeSpan.FromSeconds(5)));
     Assert(stopped, "Sibling was not drained on failure");
 }
@@ -195,67 +294,120 @@ static async Task SideQuestions()
 {
     using var fixture = new Fixture();
     var sessions = new SessionStore(fixture.Options);
+
     await sessions.SetAsync("main-session", default);
     await sessions.SetAsync("approved-session", default, approved: true);
-    foreach (var id in new[] { "main-session", "approved-session" })
+
+    foreach (var id in new[]
     {
-        var answer = await AppServerRunner.RunAsync(fixture.Options, sessions, "default", "What is happening?", [], null,
-            (_, _, _) => Task.FromResult(false), default, sideSession: id);
+        "main-session",
+        "approved-session"
+    })
+    {
+        var answer = await AppServerRunner.RunAsync(fixture.Options, sessions, "default", "What is happening?", [], null, (_, _, _) => Task.FromResult(false), default, sideSession: id);
+
         Assert(answer == "decline" && !File.Exists(Path.Combine(fixture.Root, "approved.txt")));
         Assert(await sessions.GetAsync(default) == "main-session");
         Assert(await sessions.GetAsync(default, approved: true) == "approved-session");
     }
+
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "reject-fork");
-    await Throws<AppServerException>(() => AppServerRunner.RunAsync(fixture.Options, sessions, "default", "question", [], null,
-        (_, _, _) => Task.FromResult(false), default, sideSession: "main-session"));
+    await Throws<AppServerException>(() => AppServerRunner.RunAsync(fixture.Options, sessions, "default", "question", [], null, (_, _, _) => Task.FromResult(false), default, sideSession: "main-session"));
     Assert(await sessions.GetAsync(default) == "main-session");
-    var journal = new Journal(fixture.Options); await journal.InitializeAsync(default);
-    await journal.ChangeAsync(d => {
+    var journal = new Journal(fixture.Options);
+
+    await journal.InitializeAsync(default);
+    await journal.ChangeAsync(d =>
+    {
         d.SideQuestions.Add(new SideQuestion(1, 123, "question", "default", "main-session", new(), true));
         d.Jobs.Add(new Job(2, 123, "queued main"));
     }, default);
-    var restarted = new Journal(fixture.Options); await restarted.InitializeAsync(default);
+    var restarted = new Journal(fixture.Options);
+
+    await restarted.InitializeAsync(default);
     var state = await restarted.SnapshotAsync(default);
+
     Assert(state.SideQuestions.Count == 0 && state.Jobs.Single().Id == 2);
     Assert(state.Replies.Single().Text.Contains("Side question interrupted"));
 }
+
 static async Task WorkerSideQuestions()
 {
     using var fixture = new Fixture();
-    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+    {
+        await git.WaitForExitAsync();
+    }
+
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "sleep");
     var pidFile = Path.Combine(fixture.Root, "main-pids");
+
     Environment.SetEnvironmentVariable("TEST_PID_FILE", pidFile);
     var journal = new Journal(fixture.Options);
     var sessions = new SessionStore(fixture.Options);
+
     await sessions.SetAsync("main-session", default);
     var runner = new CodexRunner(fixture.Options, sessions);
     var replies = new System.Collections.Concurrent.ConcurrentQueue<string>();
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+
         if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
         {
             await Task.Delay(20, token);
             var offset = body.RootElement.GetProperty("offset").GetInt64();
-            object Update(int id, string text, int user = 123) => new { update_id = id, message = new {
-                from = new { id = user }, chat = new { id = 123, type = "private" }, text } };
-            object[] updates = offset == 0 ? [Update(1, "long main task")] :
-                offset == 2 && File.Exists(pidFile) ? [Update(2, "/btw", 123), Update(3, "/btw forbidden", 999),
-                    Update(4, "/btw@bloodraven What is happening?"), Update(5, "/btw duplicate")] : [];
-            return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
+
+            object Update(int id, string text, int user = 123) => new
+            {
+                update_id = id,
+                message = new
+                {
+                    from = new
+                    {
+                        id = user
+                    },
+                    chat = new
+                    {
+                        id = 123,
+                        type = "private"
+                    },
+                    text
+                }
+            };
+
+            object[] updates = offset == 0 ? [Update(1, "long main task")] : offset == 2 && File.Exists(pidFile) ? [Update(2, "/btw", 123), Update(3, "/btw forbidden", 999), Update(4, "/btw@bloodraven What is happening?"), Update(5, "/btw duplicate")] : [];
+
+            return Response(200, JsonSerializer.Serialize(new
+            {
+                ok = true,
+                result = updates
+            }));
         }
-        if (body.RootElement.TryGetProperty("text", out var text)) replies.Enqueue(text.GetString()!);
+
+        if (body.RootElement.TryGetProperty("text", out var text))
+        {
+            replies.Enqueue(text.GetString()!);
+        }
+
         return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
-    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), runner, sessions, journal,
-        fixture.Options, NullLogger<BotWorker>.Instance);
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), runner, sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+
     await worker.StartAsync(default);
+
     try
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        while (!replies.Any(r => r.Contains("decline"))) await Task.Delay(25, deadline.Token);
+
+        while (!replies.Any(r => r.Contains("decline")))
+        {
+            await Task.Delay(25, deadline.Token);
+        }
+
         var state = await journal.SnapshotAsync(default);
+
         Assert(runner.IsRunning && state.Jobs.Single().Id == 1 && state.Jobs.Single().Running);
         Assert(state.SideQuestions.Count == 0 && state.Offset == 6);
         Assert(replies.Count(r => r.Contains("decline")) == 1);
@@ -263,41 +415,84 @@ static async Task WorkerSideQuestions()
         Assert(await sessions.GetAsync(default) == "main-session");
         Assert(worker.ExecuteTask?.IsCompleted == false);
     }
-    finally { await worker.StopAsync(default); }
+    finally
+    {
+        await worker.StopAsync(default);
+    }
 }
+
 static async Task TimingReports()
 {
     using var fixture = new Fixture();
     var now = DateTimeOffset.UtcNow;
     var trace = new TaskTimings(new TimingReport(1, 123, "default", now, now.ToUnixTimeSeconds(), "default", "default", "exec", "Running", []));
     var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
+
     await runner.RunAsync("private test prompt", default, timing: trace);
     var names = trace.Snapshot().Points.Select(p => p.Name).ToArray();
-    foreach (var name in new[] { "New session", "Process started", "First event", "Prompt sent", "Final answer", "Runner stopped" }) Assert(names.Contains(name), name);
+
+    foreach (var name in new[]
+    {
+        "New session",
+        "Process started",
+        "First event",
+        "Prompt sent",
+        "Final answer",
+        "Runner stopped"
+    })
+    {
+        Assert(names.Contains(name), name);
+    }
+
     await runner.RunAsync("resume", default, timing: trace);
     Assert(trace.Snapshot().Points.Any(p => p.Name == "Resuming session"));
     await runner.RunAsync("approved", default, approve: (_, _, _) => Task.FromResult(false), timing: trace);
     Assert(trace.Snapshot().Points.Any(p => p.Name == "Initialized"));
-    trace.Delivery(1100, 80, false); trace.Delivery(100, 90, true); trace.Approval(500);
-    trace.Mark("Delivered"); trace.Status("Completed; delivered");
+    trace.Delivery(1100, 80, false);
+    trace.Delivery(100, 90, true);
+    trace.Approval(500);
+    trace.Mark("Delivered");
+    trace.Status("Completed; delivered");
     var report = trace.Snapshot();
+
     Assert(report.Attempts == 2 && report.Parts == 1 && report.SendWaitMs == 1200 && report.SendHttpMs == 170);
     var text = TaskTimings.Format(report);
+
     Assert(text.Contains("1.200 s") && text.Contains("170 ms") && text.Contains("1-second precision") && !text.Contains("private test prompt"));
-    var journal = new Journal(fixture.Options); await journal.InitializeAsync(default);
+    var journal = new Journal(fixture.Options);
+
+    await journal.InitializeAsync(default);
     await journal.ChangeAsync(d => TaskTimings.Save(d, report), default);
-    var restored = new Journal(fixture.Options); await restored.InitializeAsync(default);
+    var restored = new Journal(fixture.Options);
+
+    await restored.InitializeAsync(default);
     Assert((await restored.SnapshotAsync(default)).Timings.Single().Points.Length == report.Points.Length);
-    var data = new JournalData(); data.Jobs.Add(new Job(1, 123, "pending"));
-    for (var i = 1; i <= 70; i++) TaskTimings.Save(data, report with { Id = i, Received = now.AddSeconds(i) });
+    var data = new JournalData();
+
+    data.Jobs.Add(new Job(1, 123, "pending"));
+
+    for (var i = 1; i <= 70; i++)
+    {
+        TaskTimings.Save(data, report with
+        {
+            Id = i,
+            Received = now.AddSeconds(i)
+        });
+    }
+
     Assert(data.Timings.Count == 51 && data.Timings.Any(t => t.Id == 1));
     Assert(JsonSerializer.Deserialize<JournalData>("{}")!.Timings.Count == 0);
 }
+
 static async Task JournalNotifications()
 {
     using var fixture = new Fixture();
-    var journal = new Journal(fixture.Options); await journal.InitializeAsync(default);
-    var consumer = journal.Changed; var delivery = journal.Changed;
+    var journal = new Journal(fixture.Options);
+
+    await journal.InitializeAsync(default);
+    var consumer = journal.Changed;
+    var delivery = journal.Changed;
+
     Assert(!consumer.IsCompleted && !delivery.IsCompleted);
     Assert((await journal.SnapshotAsync(default)).Jobs.Count == 0);
     // Commit before awaiting: both readers must observe the wakeup anyway.
@@ -305,13 +500,21 @@ static async Task JournalNotifications()
     await Task.WhenAll(consumer, delivery).WaitAsync(TimeSpan.FromSeconds(1));
     Assert((await journal.SnapshotAsync(default)).Jobs.Count == 1);
     Assert(!journal.Changed.IsCompleted);
-    using var stop = new CancellationTokenSource(); stop.Cancel();
+    using var stop = new CancellationTokenSource();
+
+    stop.Cancel();
     await Throws<OperationCanceledException>(() => journal.Changed.WaitAsync(stop.Token));
 }
+
 static async Task WorkerTimings()
 {
     using var fixture = new Fixture();
-    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+    {
+        await git.WaitForExitAsync();
+    }
+
     var journal = new Journal(fixture.Options);
     var replies = new List<string>();
     var date = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -319,59 +522,130 @@ static async Task WorkerTimings()
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+
         if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
         {
             await Task.Delay(20, token);
             var offset = body.RootElement.GetProperty("offset").GetInt64();
             var done = (await journal.SnapshotAsync(token)).Timings.Any(t => t.Points.Any(p => p.Name == "Delivered"));
-            object Update(int id, string text, int user = 123) => new { update_id = id, message = new { date, from = new { id = user }, chat = new { id = 123, type = "private" }, text } };
+
+            object Update(int id, string text, int user = 123) => new
+            {
+                update_id = id,
+                message = new
+                {
+                    date,
+                    from = new
+                    {
+                        id = user
+                    },
+                    chat = new
+                    {
+                        id = 123,
+                        type = "private"
+                    },
+                    text
+                }
+            };
+
             object[] updates = offset == 0 ? [Update(1, "hello timing test")] : offset == 2 && done ? [Update(2, "/timings", 999), Update(3, "/timings")] : [];
-            return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
+
+            return Response(200, JsonSerializer.Serialize(new
+            {
+                ok = true,
+                result = updates
+            }));
         }
+
         var outgoing = body.RootElement.GetProperty("text").GetString()!;
+
         if (outgoing.StartsWith("Working"))
         {
             // Reproduce completion while the working notice is still in flight.
             for (var i = 0; i < 100 && !(await journal.SnapshotAsync(token)).Replies.Any(r => r.TimingKind == "Final"); i++)
+            {
                 await Task.Delay(10, token);
+            }
+
             Assert((await journal.SnapshotAsync(token)).Replies.Any(r => r.TimingKind == "Final"));
         }
+
         if (outgoing.Contains("hello timing test") && Interlocked.Increment(ref finalAttempts) == 1)
+        {
             return Response(429, "{\"ok\":false,\"parameters\":{\"retry_after\":1}}");
-        lock (replies) replies.Add(outgoing);
+        }
+
+        lock (replies)
+        {
+            replies.Add(outgoing);
+        }
+
         return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
     var sessions = new SessionStore(fixture.Options);
     using var worker = new BotWorker(new TelegramClient(http, fixture.Options), new CodexRunner(fixture.Options, sessions), sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+
     await worker.StartAsync(default);
+
     try
     {
         for (var i = 0; i < 500; i++)
         {
-            lock (replies) { if (replies.Any(t => t.Contains("Telegram accepted final reply"))) break; }
+            lock (replies)
+            {
+                if (replies.Any(t => t.Contains("Telegram accepted final reply")))
+                {
+                    break;
+                }
+            }
+
             await Task.Delay(30);
         }
+
         var state = await journal.SnapshotAsync(default);
         var report = state.Timings.Single();
+
         Assert(report.TelegramDate == date && report.Id == 1 && report.Parts == 1 && report.Attempts == 2);
         Assert(report.Status == "Completed; delivered" && report.SendWaitMs > 0);
-        foreach (var name in new[] { "Received", "Queued", "Started", "Attachments ready", "Process started", "Final answer", "Reply ready", "Delivery started", "Delivered" })
+
+        foreach (var name in new[]
+        {
+            "Received",
+            "Queued",
+            "Started",
+            "Attachments ready",
+            "Process started",
+            "Final answer",
+            "Reply ready",
+            "Delivery started",
+            "Delivered"
+        })
+        {
             Assert(report.Points.Any(p => p.Name == name), name);
+        }
+
         lock (replies)
         {
             Assert(replies.Count(t => WebUtility.HtmlDecode(t).Contains("Timings · task")) == 1, "Timings command duplicated or authorization bypassed");
             var answer = replies.FindIndex(t => t.Contains("hello timing test"));
             var completed = replies.FindIndex(t => t.StartsWith("Completed"));
+
             Assert(answer >= 0 && completed > answer, "Late working notice inserted its completion edit ahead of the answer");
         }
+
         Assert(state.Jobs.Count == 0 && state.Offset == 4);
     }
-    finally { await worker.StopAsync(default); }
+    finally
+    {
+        await worker.StopAsync(default);
+    }
 }
+
 static async Task ModelPreferences()
 {
     using var fixture = new Fixture();
     var journal = new Journal(fixture.Options);
+
     await journal.InitializeAsync(default);
     await journal.ChangeAsync(d =>
     {
@@ -385,59 +659,103 @@ static async Task ModelPreferences()
         BotCommands.Apply(d, 123, "/conversation other", false);
         Assert(ModelSettings.For(d, "other") == new ModelSettings());
         BotCommands.Apply(d, 123, "/model other-model", false);
-        foreach (var invalid in new[] { "/model --help", "/model bad\"value", "/model x y", "/model " + new string('x', 129), "/reasoning invalid", "/preset invalid" })
+
+        foreach (var invalid in new[]
+        {
+            "/model --help",
+            "/model bad\"value",
+            "/model x y",
+            "/model " + new string ('x', 129),
+            "/reasoning invalid",
+            "/preset invalid"
+        })
+        {
             BotCommands.Apply(d, 123, invalid, false);
+        }
+
         Assert(ModelSettings.For(d, "other") == new ModelSettings("other-model"));
     }, default);
     var snapshot = await journal.SnapshotAsync(default);
+
     snapshot.ModelSettings.Clear();
     Assert((await journal.SnapshotAsync(default)).ModelSettings.Count == 2, "Snapshot mutated live settings");
     var restarted = new Journal(fixture.Options);
+
     await restarted.InitializeAsync(default);
     var state = await restarted.SnapshotAsync(default);
+
     Assert(ModelSettings.For(state, "default") == new ModelSettings("example-model", "low"));
     Assert(state.Jobs.Single().Settings == new ModelSettings("example-model", "high"));
     BotCommands.Apply(state, 123, "/conversation default", false);
     BotCommands.Apply(state, 123, "/model default", false);
     BotCommands.Apply(state, 123, "/reasoning default", false);
     Assert(ModelSettings.For(state, "default") == new ModelSettings());
-    foreach (var pair in new[] { ("fast", "low"), ("balanced", "medium"), ("thorough", "high") })
+
+    foreach (var pair in new[]
+    {
+        ("fast", "low"),
+        ("balanced", "medium"),
+        ("thorough", "high")
+    })
     {
         BotCommands.Apply(state, 123, "/preset " + pair.Item1, false);
         Assert(ModelSettings.For(state, "default").Effort == pair.Item2);
     }
+
     var legacy = JsonSerializer.Deserialize<JournalData>("{\"Jobs\":[{\"Id\":1,\"ChatId\":123,\"Text\":\"test\"}]}")!;
+
     Assert(legacy.ModelSettings.Count == 0 && legacy.Jobs.Single().Settings is null);
 }
+
 static async Task ModelRunners()
 {
     using var fixture = new Fixture();
     var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
-    foreach (var settings in new[] { new ModelSettings("example-model", "high"), new ModelSettings("second-model", "low"), new ModelSettings() })
+
+    foreach (var settings in new[]
+    {
+        new ModelSettings("example-model", "high"),
+        new ModelSettings("second-model", "low"),
+        new ModelSettings()
+    })
     {
         using var json = JsonDocument.Parse(await runner.RunAsync("test", default, settings: settings));
         var args = json.RootElement.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+
         Assert(args.Contains("model=\"" + settings.Model + "\"") == (settings.Model is not null));
         Assert(args.Contains("model_reasoning_effort=\"" + settings.Effort + "\"") == (settings.Effort is not null));
         Assert(args.Contains("--sandbox") && args.Contains(fixture.Options.Sandbox));
     }
+
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "model-settings");
-    foreach (var name in new[] { "start", "resume" })
-        Assert(await runner.RunAsync(name, default, approve: (_, _, _) => Task.FromResult(false),
-            settings: new ModelSettings("example-model", "high")) == "decline");
+
+    foreach (var name in new[]
+    {
+        "start",
+        "resume"
+    })
+    {
+        Assert(await runner.RunAsync(name, default, approve: (_, _, _) => Task.FromResult(false), settings: new ModelSettings("example-model", "high")) == "decline");
+    }
+
     await Throws<InvalidDataException>(() => runner.RunAsync("invalid", default, settings: new ModelSettings("x\";bad")));
 }
+
 static async Task CatalogueMenus()
 {
     using var fixture = new Fixture();
     var catalogue = await ModelCatalogue.ReadAsync(fixture.Options, default);
+
     Assert(catalogue.Count == 2 && catalogue[1].Id == "model-two");
     var state = new JournalData();
+
     BotCommands.Apply(state, 123, "/effort high", false);
     Assert(ModelSettings.For(state, "default").Effort == "high");
     var menus = new ModelMenus();
+
     menus.Show(state, 123, true, catalogue);
     var choice = state.Replies.Last().Buttons![1][0].Data["choice:".Length..];
+
     Assert(menus.Select(state, 999, choice).StartsWith("Menu expired"));
     state.ActiveConversation = "other";
     Assert(menus.Select(state, 123, choice).StartsWith("Menu expired"));
@@ -450,6 +768,7 @@ static async Task CatalogueMenus()
     state.ActiveConversation = "default";
     menus.Show(state, 123, false, catalogue);
     var buttons = state.Replies.Last().Buttons!;
+
     Assert(buttons.Length == 3 && buttons[2][0].Text == "high");
     menus.Select(state, 123, buttons[2][0].Data["choice:".Length..]);
     Assert(ModelSettings.For(state, "default").Effort == "high");
@@ -457,54 +776,76 @@ static async Task CatalogueMenus()
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "catalogue-error");
     await Throws<IOException>(() => ModelCatalogue.ReadAsync(fixture.Options, default));
 }
+
 static Task Tables()
 {
     var parts = TelegramFormatter.Format("Intro\n\n| Addition | Benefits |\n|---|---|\n| [Uptime Kuma](https://example.com/) | Monitor **Plex** & servers |\n| Backups | Alert on failures |\n\nEnd");
     var html = string.Concat(parts.Select(p => p.Html));
     var plain = string.Concat(parts.Select(p => p.Plain));
+
     Assert(html.Contains("<b><a href=\"https://example.com/\">Uptime Kuma</a></b>"));
     Assert(plain.Contains("Uptime Kuma\nMonitor Plex & servers\n\nBackups\nAlert on failures"));
     Assert(!plain.Contains("|---") && plain.StartsWith("Intro") && plain.EndsWith("End"));
     var multi = TelegramFormatter.Format("Host | Status | Command\n:---|---:|:---:\nserver02 | Healthy | `echo a|b`\nother | A\\|B | done");
+
     Assert(multi[0].Plain.Contains("server02\nStatus: Healthy\nCommand: echo a|b"));
     Assert(multi[0].Plain.Contains("Status: A|B"));
     var code = "| A | B |\n|---|---|\n| x | y |";
+
     Assert(string.Concat(TelegramFormatter.Format("```\n" + code + "\n```").Select(p => p.Plain)).TrimEnd() == code);
     var malformed = "a|b\nnot a divider\nx|y";
+
     Assert(TelegramFormatter.Format(malformed)[0].Plain == malformed);
     var longTable = "A|B\n---|---\n[Link](https://example.com/)|" + string.Concat(Enumerable.Repeat("😀<tag>& ", 1000));
+
     foreach (var p in TelegramFormatter.Format(longTable, 100))
     {
         Assert(p.Plain.Length <= 100 && !char.IsHighSurrogate(p.Plain[^1]));
         _ = XElement.Parse("<root>" + p.Html + "</root>");
         Assert(!p.Html.Contains("<tag>"));
     }
-    foreach (var p in parts.Concat(multi)) _ = XElement.Parse("<root>" + p.Html + "</root>");
+
+    foreach (var p in parts.Concat(multi))
+    {
+        _ = XElement.Parse("<root>" + p.Html + "</root>");
+    }
+
     return Task.CompletedTask;
 }
+
 static Task Formatting()
 {
     var parts = TelegramFormatter.Format("Yes—**all containers are running**.\n- **comfyui, ollama** — stopped.\n`a < b && c`\n<script>x</script>\n```cs\nvar x = 1 < 2;\n```");
     var html = string.Concat(parts.Select(p => p.Html));
+
     Assert(html.Contains("<b>all containers are running</b>"));
     Assert(html.Contains("• <b>comfyui, ollama</b>"));
     Assert(html.Contains("<code>a &lt; b &amp;&amp; c</code>"));
     Assert(!html.Contains("<script>"));
     Assert(html.Contains("<pre>"));
-    foreach (var p in parts) _ = XElement.Parse("<root>" + p.Html + "</root>");
+
+    foreach (var p in parts)
+    {
+        _ = XElement.Parse("<root>" + p.Html + "</root>");
+    }
+
     return Task.CompletedTask;
 }
+
 static Task FormattingLimits()
 {
     var source = "**" + new string('a', 3499) + "😀" + new string('b', 4000) + "**";
     var parts = TelegramFormatter.Format(source);
+
     Assert(string.Concat(parts.Select(p => p.Plain)) == source[2..^2]);
+
     foreach (var part in parts)
     {
         Assert(part.Plain.Length <= 3500);
         Assert(!char.IsHighSurrogate(part.Plain[^1]) && !char.IsLowSurrogate(part.Plain[0]));
         _ = XElement.Parse("<root>" + part.Html + "</root>");
     }
+
     Assert(TelegramFormatter.Format("[docs](https://example.com/?a=1&b=2)")[0].Html.Contains("<a href="));
     Assert(!TelegramFormatter.Format("[bad](javascript:alert(1))")[0].Html.Contains("<a"));
     Assert(TelegramFormatter.Format("   ").Count == 1);
@@ -512,117 +853,205 @@ static Task FormattingLimits()
     Assert(BotWorker.Command("/status@my_bot\nanything") == "/status");
     return Task.CompletedTask;
 }
+
 static async Task Configuration()
 {
     using var fixture = new Fixture();
     var o = fixture.Options;
+
     Assert(o.ProgressIntervalSeconds == 30);
-    foreach (var value in new[] { "0", "10", "3600" })
+
+    foreach (var value in new[]
+    {
+        "0",
+        "10",
+        "3600"
+    })
     {
         Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", value);
         Assert(new AppOptions().ProgressIntervalSeconds == int.Parse(value));
     }
-    foreach (var value in new[] { "-1", "1", "3601", "oops" })
+
+    foreach (var value in new[]
+    {
+        "-1",
+        "1",
+        "3601",
+        "oops"
+    })
     {
         Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", value);
-        await Throws<InvalidOperationException>(() => { _ = new AppOptions(); return Task.CompletedTask; });
+        await Throws<InvalidOperationException>(() =>
+        {
+            _ = new AppOptions();
+            return Task.CompletedTask;
+        });
     }
+
     Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", null);
     Assert(o.Accepts(new TelegramMessage(new TelegramUser(123), new TelegramChat(123, "private"), "hello")));
     Assert(!o.Accepts(new TelegramMessage(new TelegramUser(123), new TelegramChat(123, "group"), "hello")));
     Assert(!o.Accepts(new TelegramMessage(new TelegramUser(999), new TelegramChat(123, "private"), "hello")));
     Environment.SetEnvironmentVariable("BLOODRAVEN_ALLOWED_CHAT_ID", "typo");
-    await Throws<InvalidOperationException>(() => { _ = new AppOptions(); return Task.CompletedTask; });
+    await Throws<InvalidOperationException>(() =>
+    {
+        _ = new AppOptions();
+        return Task.CompletedTask;
+    });
 }
+
 static async Task Recovery()
 {
     using var fixture = new Fixture();
     var journal = new Journal(fixture.Options);
+
     await journal.InitializeAsync(default);
-    await journal.ChangeAsync(d => { d.Offset = 11; d.Jobs.Add(new Job(9, 123, "running", true)); d.Jobs.Add(new Job(10, 123, "queued")); }, default);
+    await journal.ChangeAsync(d =>
+    {
+        d.Offset = 11;
+        d.Jobs.Add(new Job(9, 123, "running", true));
+        d.Jobs.Add(new Job(10, 123, "queued"));
+    }, default);
     var recovered = new Journal(fixture.Options);
+
     await recovered.InitializeAsync(default);
     var state = await recovered.SnapshotAsync(default);
+
     Assert(state.Offset == 11 && state.Jobs.Count == 1 && state.Jobs[0].Id == 10);
     Assert(state.Replies.Single().Text.Contains("NOT been rerun"));
     var again = new Journal(fixture.Options);
+
     await again.InitializeAsync(default);
     Assert((await again.SnapshotAsync(default)).Replies.Count == 1);
     var sessions = new SessionStore(fixture.Options);
+
     await sessions.SetAsync("11111111-1111-1111-1111-111111111111", default);
     Assert(await new SessionStore(fixture.Options).GetAsync(default) is not null);
     await sessions.ClearAsync(default);
     Assert(await sessions.GetAsync(default) is null);
 }
+
 static async Task FailedWrite()
 {
     using var fixture = new Fixture();
     var journal = new Journal(fixture.Options);
+
     await journal.InitializeAsync(default);
     Directory.CreateDirectory(Path.Combine(fixture.Options.StateDirectory, "journal.json.tmp"));
     var changed = journal.Changed;
+
     await Throws<UnauthorizedAccessException>(() => journal.ChangeAsync(d => d.Offset = 99, default));
     Assert((await journal.SnapshotAsync(default)).Offset == 0);
     Assert(!changed.IsCompleted, "Failed persistence must not notify readers");
 }
+
 static async Task Bounded()
 {
     await Throws<InvalidDataException>(async () =>
-    { await foreach (var line in BoundedLines.ReadAsync(new StringReader(new string('x', 101)), 100, default)) _ = line; });
+    {
+        await foreach (var line in BoundedLines.ReadAsync(new StringReader(new string('x', 101)), 100, default))
+        {
+            _ = line;
+        }
+    });
     var lines = new List<string>();
-    await foreach (var line in BoundedLines.ReadAsync(new StringReader("one\r\ntwo"), 100, default)) lines.Add(line);
+
+    await foreach (var line in BoundedLines.ReadAsync(new StringReader("one\r\ntwo"), 100, default))
+    {
+        lines.Add(line);
+    }
+
     Assert(lines.SequenceEqual(new[] { "one", "two" }));
 }
+
 static async Task Runner()
 {
     using var fixture = new Fixture();
     var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
     var activity = new TaskProgress();
     using var result = JsonDocument.Parse(await runner.RunAsync("--help\n$(not-a-shell)", default, activity.Observe));
+
     Assert(!activity.TakeUpdate().Contains("prompt"), "Answer leaked into progress");
     Assert(result.RootElement.GetProperty("prompt").GetString() == "--help\n$(not-a-shell)");
     Assert(result.RootElement.GetProperty("secret").ValueKind == JsonValueKind.Null);
     Assert(result.RootElement.GetProperty("cwd").GetString() == fixture.Root);
     using var resumed = JsonDocument.Parse(await runner.RunAsync("follow up", default));
+
     Assert(resumed.RootElement.GetProperty("args").EnumerateArray().Any(a => a.GetString() == "resume"));
     Assert(!runner.IsRunning);
 }
+
 static Task Cancellation() => TreeFailure("sleep", true);
+
 static Task Malformed() => TreeFailure("malformed", false);
+
 static async Task TreeFailure(string mode, bool cancel)
 {
     using var fixture = new Fixture();
+
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", mode);
     var pidFile = Path.Combine(fixture.Root, "pids");
+
     Environment.SetEnvironmentVariable("TEST_PID_FILE", pidFile);
     var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
     var task = runner.RunAsync("test", default);
-    for (var i = 0; i < 100 && !File.Exists(pidFile); i++) await Task.Delay(25);
+
+    for (var i = 0; i < 100 && !File.Exists(pidFile); i++)
+    {
+        await Task.Delay(25);
+    }
+
     Assert(File.Exists(pidFile));
-    if (cancel) { runner.Cancel(); await Throws<OperationCanceledException>(() => task); }
-    else await Throws<InvalidOperationException>(() => task);
+    if (cancel)
+    {
+        runner.Cancel();
+        await Throws<OperationCanceledException>(() => task);
+    }
+    else
+    {
+        await Throws<InvalidOperationException>(() => task);
+    }
+
     Assert(!runner.IsRunning);
+
     foreach (var pid in File.ReadAllText(pidFile).Split(' ').Select(int.Parse))
     {
         var stat = $"/proc/{pid}/stat";
+
         Assert(!File.Exists(stat) || File.ReadAllText(stat).Split(' ')[2] == "Z", "Child process survived cleanup");
     }
 }
+
 static async Task RunnerFailures()
 {
     using var fixture = new Fixture();
-    foreach (var mode in new[] { "oversized", "failure" })
+
+    foreach (var mode in new[]
+    {
+        "oversized",
+        "failure"
+    })
     {
         Environment.SetEnvironmentVariable("TEST_CODEX_MODE", mode);
         var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
+
         await Throws<InvalidOperationException>(() => runner.RunAsync("test", default));
         Assert(!runner.IsRunning);
     }
+
     var sessions = new SessionStore(fixture.Options);
+
     await sessions.SetAsync("11111111-1111-1111-1111-111111111111", default);
-    foreach (var mode in new[] { "cli-rejected", "turn-failed", "failure" })
+
+    foreach (var mode in new[]
+    {
+        "cli-rejected",
+        "turn-failed",
+        "failure"
+    })
     {
         Environment.SetEnvironmentVariable("TEST_CODEX_MODE", mode);
+
         try
         {
             await new CodexRunner(fixture.Options, sessions).RunAsync("private prompt", default);
@@ -632,12 +1061,24 @@ static async Task RunnerFailures()
         {
             Assert(ex.Resumed);
             Assert(!ex.ToString().Contains("private stderr details") && !ex.ToString().Contains("private prompt") && !ex.ToString().Contains("test-secret"));
-            if (mode == "cli-rejected") Assert(ex.ExitCode == 2 && ex.Stage == "process-exit" && ex.Reason.StartsWith("CLI arguments rejected"));
-            if (mode == "turn-failed") Assert(ex.Stage == "turn.failed" && ex.Reason == "usage or rate limit reached");
-            if (mode == "failure") Assert(ex.ExitCode == 2 && ex.Reason.StartsWith("unclassified"));
+            if (mode == "cli-rejected")
+            {
+                Assert(ex.ExitCode == 2 && ex.Stage == "process-exit" && ex.Reason.StartsWith("CLI arguments rejected"));
+            }
+
+            if (mode == "turn-failed")
+            {
+                Assert(ex.Stage == "turn.failed" && ex.Reason == "usage or rate limit reached");
+            }
+
+            if (mode == "failure")
+            {
+                Assert(ex.ExitCode == 2 && ex.Reason.StartsWith("unclassified"));
+            }
         }
     }
 }
+
 static async Task HtmlFallback()
 {
     using var fixture = new Fixture();
@@ -646,14 +1087,16 @@ static async Task HtmlFallback()
     {
         bodies.Add(await request.Content!.ReadAsStringAsync(token));
         using var parsed = JsonDocument.Parse(bodies[^1]);
+
         Assert(!parsed.RootElement.TryGetProperty("reply_markup", out _));
         Assert(!parsed.RootElement.TryGetProperty("message_id", out _));
-        return bodies.Count == 1 ? Response(400, "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: can't parse entities\"}")
-            : Response(200, "{\"ok\":true,\"result\":{}}");
+        return bodies.Count == 1 ? Response(400, "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: can't parse entities\"}") : Response(200, "{\"ok\":true,\"result\":{}}");
     }));
+
     await new TelegramClient(http, fixture.Options).SendAsync(123, new FormattedMessage("<b>hi</b>", "hi"), default);
     Assert(bodies[0].Contains("parse_mode") && !bodies[1].Contains("parse_mode"));
 }
+
 static async Task TelegramPayloads()
 {
     using var fixture = new Fixture();
@@ -662,18 +1105,27 @@ static async Task TelegramPayloads()
     {
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
         var root = body.RootElement;
+
         // Match Telegram's parser: JSON null is not an absent keyboard.
         if (root.TryGetProperty("reply_markup", out var markup) && markup.ValueKind != JsonValueKind.Object)
+        {
             return Response(400, "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: object expected as reply markup\"}");
+        }
+
         if (request.RequestUri!.AbsolutePath.EndsWith("sendMessage"))
+        {
             Assert(!root.TryGetProperty("message_id", out _), "New messages must omit the edit-only message ID");
+        }
+
         bodies.Add(root.Clone());
         return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
     var telegram = new TelegramClient(http, fixture.Options);
     var message = new FormattedMessage("Hello", "Hello");
+
     Assert(await telegram.SendAsync(123, message, default) == 42);
     InlineButton[][] buttons = [[new("Next", "front:1")]];
+
     await telegram.SendAsync(123, message, default, buttons);
     await telegram.SendAsync(123, message, default, editMessageId: 42);
     await telegram.SendAsync(123, message, default, buttons, 42);
@@ -687,90 +1139,181 @@ static async Task TelegramPayloads()
 static async Task TelegramErrors()
 {
     using var fixture = new Fixture();
-    using var http = new HttpClient(new Handler((_, _) => Task.FromResult(Response(429,
-        "{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":7}}"))));
-    try { await new TelegramClient(http, fixture.Options).CheckAsync(default); throw new Exception("Expected rate limit"); }
-    catch (TelegramException ex) { Assert(ex.RetryAfter == 7 && ex.Status == 429); }
+    using var http = new HttpClient(new Handler((_, _) => Task.FromResult(Response(429, "{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":7}}"))));
+
+    try
+    {
+        await new TelegramClient(http, fixture.Options).CheckAsync(default);
+        throw new Exception("Expected rate limit");
+    }
+    catch (TelegramException ex)
+    {
+        Assert(ex.RetryAfter == 7 && ex.Status == 429);
+    }
+
     using var broken = new HttpClient(new Handler((_, _) => throw new HttpRequestException("url-with-private-token")));
-    try { await new TelegramClient(broken, fixture.Options).CheckAsync(default); }
-    catch (TelegramException ex) { Assert(!ex.ToString().Contains("private-token")); return; }
+
+    try
+    {
+        await new TelegramClient(broken, fixture.Options).CheckAsync(default);
+    }
+    catch (TelegramException ex)
+    {
+        Assert(!ex.ToString().Contains("private-token"));
+        return;
+    }
+
     throw new Exception("Expected network error");
 }
+
 static async Task WorkerOutage()
 {
     using var fixture = new Fixture();
+
     using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+    {
         await git.WaitForExitAsync();
+    }
+
     var sent = 0;
     var delivered = new List<string>();
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         var body = await request.Content!.ReadAsStringAsync(token);
+
         if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
         {
             using var json = JsonDocument.Parse(body);
+
             await Task.Delay(50, token);
-            return Response(200, json.RootElement.GetProperty("offset").GetInt64() == 0
-                ? "{\"ok\":true,\"result\":[{\"update_id\":1,\"message\":{\"from\":{\"id\":123},\"chat\":{\"id\":123,\"type\":\"private\"},\"text\":\"hello\"}}]}"
-                : "{\"ok\":true,\"result\":[]}");
+            return Response(200, json.RootElement.GetProperty("offset").GetInt64() == 0 ? "{\"ok\":true,\"result\":[{\"update_id\":1,\"message\":{\"from\":{\"id\":123},\"chat\":{\"id\":123,\"type\":\"private\"},\"text\":\"hello\"}}]}" : "{\"ok\":true,\"result\":[]}");
         }
-        if (++sent == 1) return Response(429, "{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":1}}");
-        lock (delivered) delivered.Add(body);
+
+        if (++sent == 1)
+        {
+            return Response(429, "{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":1}}");
+        }
+
+        lock (delivered)
+        {
+            delivered.Add(body);
+        }
+
         return Response(200, "{\"ok\":true,\"result\":{}}");
     }));
     var journal = new Journal(fixture.Options);
     var sessions = new SessionStore(fixture.Options);
-    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), new CodexRunner(fixture.Options, sessions),
-        sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), new CodexRunner(fixture.Options, sessions), sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+
     await worker.StartAsync(default);
+
     try
     {
         for (var i = 0; i < 200; i++)
         {
-            lock (delivered) { if (delivered.Count >= 3) break; }
+            lock (delivered)
+            {
+                if (delivered.Count >= 3)
+                {
+                    break;
+                }
+            }
+
             await Task.Delay(50);
         }
-        lock (delivered) Assert(delivered.Count == 3, "Replies were not recovered after the outage");
+
+        lock (delivered)
+        {
+            Assert(delivered.Count == 3, "Replies were not recovered after the outage");
+        }
+
         Assert(worker.ExecuteTask?.IsCompleted == false);
         var state = await journal.SnapshotAsync(default);
+
         Assert(state.Offset == 2 && state.Jobs.Count == 0 && state.Replies.Count == 0);
     }
-    finally { await worker.StopAsync(default); }
+    finally
+    {
+        await worker.StopAsync(default);
+    }
 }
+
 static HttpResponseMessage Response(int status, string json) => new((HttpStatusCode)status)
-{ Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json") };
+{
+    Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+};
 
 static async Task Progress()
 {
     var progress = new TaskProgress();
+
     void Observe(string kind, string text)
     {
-        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new { type = "item.completed", item = new { type = kind, text } }));
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            type = "item.completed",
+            item = new
+            {
+                type = kind,
+                text
+            }
+        }));
+
         progress.Observe(json.RootElement);
     }
+
     Observe("reasoning", "private reasoning");
     Assert(!progress.TakeUpdate().Contains("private reasoning"));
     Observe("agent_message", "Checking **services** secret-token\u001b" + new string('x', 900));
     var update = progress.TakeUpdate();
+
     Assert(!update.Contains("Checking **services**"), "Agent message leaked into progress");
     Assert(!update.Contains("secret-token") && !update.Contains('\u001b') && update.Length < 800);
     Assert(!progress.TakeUpdate().Contains("Checking"), "Repeated old activity");
     Observe("command_execution", "sensitive raw output");
     update = progress.TakeUpdate();
     Assert(update.Contains("A command finished") && !update.Contains("sensitive"));
-    foreach (var eventType in new[] { "item.started", "item.updated", "item.completed" })
+
+    foreach (var eventType in new[]
+    {
+        "item.started",
+        "item.updated",
+        "item.completed"
+    })
     {
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(new
-        { type = eventType, item = new { type = "agent_message", text = "Final answer" } }));
+        {
+            type = eventType,
+            item = new
+            {
+                type = "agent_message",
+                text = "Final answer"
+            }
+        }));
+
         progress.Observe(json.RootElement);
         Assert(!progress.TakeUpdate().Contains("Final answer"));
     }
+
     var count = 0;
     using var stop = new CancellationTokenSource();
-    await progress.RunAsync(TimeSpan.Zero, (_, _) => { count++; return Task.CompletedTask; }, stop.Token);
+
+    await progress.RunAsync(TimeSpan.Zero, (_, _) =>
+    {
+        count++;
+        return Task.CompletedTask;
+    }, stop.Token);
     Assert(count == 0);
     var loop = progress.RunAsync(TimeSpan.FromMilliseconds(10), (_, _) =>
-    { if (++count == 2) stop.Cancel(); return Task.CompletedTask; }, stop.Token);
+    {
+        if (++count == 2)
+        {
+            stop.Cancel();
+        }
+
+        return Task.CompletedTask;
+    }, stop.Token);
+
     await Throws<OperationCanceledException>(() => loop.WaitAsync(TimeSpan.FromSeconds(5)));
     Assert(count == 2);
 }
@@ -778,14 +1321,28 @@ static async Task Progress()
 static Task DetailedProgress()
 {
     var progress = new TaskProgress("bridge-secret");
+
     void Event(string type, string id, string command, string output, int? exit = null)
     {
-        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new { type,
-            item = new { type = "command_execution", id, command, aggregated_output = output, exit_code = exit } }));
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            type,
+            item = new
+            {
+                type = "command_execution",
+                id,
+                command,
+                aggregated_output = output,
+                exit_code = exit
+            }
+        }));
+
         progress.Observe(json.RootElement);
     }
+
     Event("item.started", "a", "docker inspect plex", "");
     var update = progress.TakeUpdate();
+
     Assert(update.Contains("0 completed, 1 running") && update.Contains("docker inspect plex") && update.Contains("observed for"));
     Event("item.updated", "a", "docker inspect plex", "healthy\nTOKEN=hidden PASSWORD=\"two words\"\nBearer hidden-auth bridge-secret");
     update = progress.TakeUpdate();
@@ -801,10 +1358,16 @@ static Task DetailedProgress()
     Event("item.completed", "b", "sleep 10", "", null);
     Assert(progress.TakeUpdate().Contains("exit code unavailable"));
     var fakeCredential = Guid.NewGuid().ToString("N"); // Generated test data, never a real credential.
+
     Event("item.started", "c", $"curl --token {fakeCredential}", "-----BEGIN PRIVATE KEY-----\nsecret material");
     update = progress.TakeUpdate();
     Assert(!update.Contains(fakeCredential) && !update.Contains("secret material"));
-    for (var i = 0; i < 8; i++) Event("item.updated", "c", new string('x', 2000), new string('y', 5000) + i);
+
+    for (var i = 0; i < 8; i++)
+    {
+        Event("item.updated", "c", new string('x', 2000), new string('y', 5000) + i);
+    }
+
     update = progress.TakeUpdate();
     Assert(update.Length < 3500 && TelegramFormatter.Format(update).Count == 1);
     return Task.CompletedTask;
@@ -813,40 +1376,68 @@ static Task DetailedProgress()
 static async Task WorkerProgress()
 {
     using var fixture = new Fixture();
+
     Environment.SetEnvironmentVariable("BLOODRAVEN_PROGRESS_INTERVAL_SECONDS", "10");
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "progress");
     var options = new AppOptions();
+
     using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+    {
         await git.WaitForExitAsync();
+    }
+
     var delivered = new List<string>();
     var methods = new List<string>();
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
-        { await Task.Delay(50, token); return Response(200, "{\"ok\":true,\"result\":[]}"); }
+        {
+            await Task.Delay(50, token);
+            return Response(200, "{\"ok\":true,\"result\":[]}");
+        }
+
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+
         lock (delivered)
         {
             delivered.Add(body.RootElement.GetProperty("text").GetString()!);
             methods.Add(request.RequestUri.AbsolutePath.Split('/').Last());
-            if (methods[^1] == "editMessageText") Assert(body.RootElement.GetProperty("message_id").GetInt64() == 42);
+            if (methods[^1] == "editMessageText")
+            {
+                Assert(body.RootElement.GetProperty("message_id").GetInt64() == 42);
+            }
         }
+
         return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
     var journal = new Journal(options);
     var sessions = new SessionStore(options);
-    using var worker = new BotWorker(new TelegramClient(http, options), new CodexRunner(options, sessions),
-        sessions, journal, options, NullLogger<BotWorker>.Instance);
+    using var worker = new BotWorker(new TelegramClient(http, options), new CodexRunner(options, sessions), sessions, journal, options, NullLogger<BotWorker>.Instance);
+
     await worker.StartAsync(default);
+
     try
     {
-        for (var i = 0; i < 100 && !File.Exists(Path.Combine(options.StateDirectory, "ready")); i++) await Task.Delay(50);
-        await journal.ChangeAsync(d => d.Jobs.Add(new Job(1, 123, "test progress")), default);
-        for (var i = 0; i < 400; i++)
+        for (var i = 0; i < 100 && !File.Exists(Path.Combine(options.StateDirectory, "ready")); i++)
         {
-            lock (delivered) { if (delivered.Count >= 4) break; }
             await Task.Delay(50);
         }
+
+        await journal.ChangeAsync(d => d.Jobs.Add(new Job(1, 123, "test progress")), default);
+
+        for (var i = 0; i < 400; i++)
+        {
+            lock (delivered)
+            {
+                if (delivered.Count >= 4)
+                {
+                    break;
+                }
+            }
+
+            await Task.Delay(50);
+        }
+
         lock (delivered)
         {
             Assert(methods.SequenceEqual(new[] { "sendMessage", "editMessageText", "sendMessage", "editMessageText" }));
@@ -857,52 +1448,135 @@ static async Task WorkerProgress()
             Assert(delivered[3].Contains("Completed"));
             Assert(delivered.Count(t => t.Contains("Task complete")) == 1, "Final answer delivered twice");
         }
+
         Assert(worker.ExecuteTask?.IsCompleted == false);
     }
-    finally { await worker.StopAsync(default); }
+    finally
+    {
+        await worker.StopAsync(default);
+    }
+
     Assert((await journal.SnapshotAsync(default)).Replies.All(r => !r.Text.Contains("Still working")));
 }
 
 static async Task WorkerControls()
 {
     using var fixture = new Fixture();
-    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+    {
+        await git.WaitForExitAsync();
+    }
+
     var replies = new List<string>();
     using var http = new HttpClient(new Handler(async (request, token) =>
     {
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+
         if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
         {
             await Task.Delay(20, token);
-            object Callback(int id, int user, string data) => new { update_id = id, callback_query = new { id = id.ToString(), from = new { id = user }, data,
-                message = new { from = new { id = 456 }, chat = new { id = 123, type = "private" }, text = "button", message_id = 70 } } };
-            object[] updates = body.RootElement.GetProperty("offset").GetInt64() == 0 ? [Callback(1, 999, "conv:hijack"), Callback(2, 123, "conv:homelab"),
-                new { update_id = 3, message = new { from = new { id = 123 }, chat = new { id = 123, type = "private" }, text = "/health" } }] : [];
-            return Response(200, JsonSerializer.Serialize(new { ok = true, result = updates }));
+            object Callback(int id, int user, string data) => new
+            {
+                update_id = id,
+                callback_query = new
+                {
+                    id = id.ToString(),
+                    from = new
+                    {
+                        id = user
+                    },
+                    data,
+                    message = new
+                    {
+                        from = new
+                        {
+                            id = 456
+                        },
+                        chat = new
+                        {
+                            id = 123,
+                            type = "private"
+                        },
+                        text = "button",
+                        message_id = 70
+                    }
+                }
+            };
+
+            object[] updates = body.RootElement.GetProperty("offset").GetInt64() == 0 ? [Callback(1, 999, "conv:hijack"), Callback(2, 123, "conv:homelab"), new
+            {
+                update_id = 3,
+                message = new
+                {
+                    from = new
+                    {
+                        id = 123
+                    },
+                    chat = new
+                    {
+                        id = 123,
+                        type = "private"
+                    },
+                    text = "/health"
+                }
+            }
+
+            ] : [];
+
+            return Response(200, JsonSerializer.Serialize(new
+            {
+                ok = true,
+                result = updates
+            }));
         }
+
         if (request.RequestUri.AbsolutePath.EndsWith("sendMessage"))
-            lock (replies) replies.Add(body.RootElement.GetProperty("text").GetString()!);
+        {
+            lock (replies)
+            {
+                replies.Add(body.RootElement.GetProperty("text").GetString()!);
+            }
+        }
+
         return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
     }));
     var journal = new Journal(fixture.Options);
     var sessions = new SessionStore(fixture.Options);
-    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), new CodexRunner(fixture.Options, sessions),
-        sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), new CodexRunner(fixture.Options, sessions), sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+
     await worker.StartAsync(default);
+
     try
     {
         for (var i = 0; i < 200; i++)
         {
-            lock (replies) { if (replies.Any(r => r.Contains("Recent failures"))) break; }
+            lock (replies)
+            {
+                if (replies.Any(r => r.Contains("Recent failures")))
+                {
+                    break;
+                }
+            }
+
             await Task.Delay(30);
         }
+
         var state = await journal.SnapshotAsync(default);
+
         Assert(state.Offset == 4 && state.ActiveConversation == "homelab" && !state.Conversations.Contains("hijack"));
         Assert(state.Jobs.Count == 0);
-        lock (replies) Assert(replies.Any(r => r.Contains("Bloodraven " + BotWorker.Version) && r.Contains("Repository:") && r.Contains("Recent failures")));
+        lock (replies)
+        {
+            Assert(replies.Any(r => r.Contains("Bloodraven " + BotWorker.Version) && r.Contains("Repository:") && r.Contains("Recent failures")));
+        }
+
         Assert(worker.ExecuteTask?.IsCompleted == false);
     }
-    finally { await worker.StopAsync(default); }
+    finally
+    {
+        await worker.StopAsync(default);
+    }
 }
 
 static async Task DeleteConversation()
@@ -910,6 +1584,7 @@ static async Task DeleteConversation()
     using var fixture = new Fixture();
     var sessions = new SessionStore(fixture.Options);
     var journal = new Journal(fixture.Options);
+
     await journal.InitializeAsync(default);
     await sessions.SetAsync("keep", default);
     await sessions.SetAsync("old", default, "remove");
@@ -926,22 +1601,41 @@ static async Task DeleteConversation()
         d.Schedules.Add(new Schedule("s", 123, "prompt", "remove", "every 30m", DateTimeOffset.UtcNow));
     }, default);
     async Task Delete(string text) => await journal.ChangeWithAsync(d => BotCommands.DeleteAsync(d, 123, text, sessions, default), default);
-    foreach (var command in new[] { "/delete", "/delete ../escape", "/delete default", "/delete missing", "/delete remove" })
+
+    foreach (var command in new[]
+    {
+        "/delete",
+        "/delete ../escape",
+        "/delete default",
+        "/delete missing",
+        "/delete remove"
+    })
+    {
         await Delete(command);
+    }
+
     Assert((await journal.SnapshotAsync(default)).Jobs.Count == 2);
     Assert(await sessions.GetAsync(default, "remove") == "old");
     await journal.ChangeAsync(d =>
     {
-        d.Jobs[1] = d.Jobs[1] with { Running = false };
-        d.SideQuestions[0] = d.SideQuestions[0] with { Running = true };
+        d.Jobs[1] = d.Jobs[1] with
+        {
+            Running = false
+        };
+        d.SideQuestions[0] = d.SideQuestions[0] with
+        {
+            Running = true
+        };
     }, default);
     await Delete("/delete remove");
     Assert((await journal.SnapshotAsync(default)).Conversations.Contains("remove"), "Deleted running BTW");
     await journal.ChangeAsync(d => d.SideQuestions[0] = d.SideQuestions[0] with { Running = false }, default);
     await Delete("/delete remove");
     var restored = new Journal(fixture.Options);
+
     await restored.InitializeAsync(default);
     var state = await restored.SnapshotAsync(default);
+
     Assert(state.Conversations.SequenceEqual(new[] { "default" }) && state.ActiveConversation == "default");
     Assert(state.Jobs.Count == 1 && state.Jobs[0].Id == 1);
     Assert(state.SideQuestions.Count == 0 && state.Schedules.Count == 0);
@@ -956,6 +1650,7 @@ static async Task ConversationsAndQueue()
 {
     using var fixture = new Fixture();
     var sessions = new SessionStore(fixture.Options);
+
     await sessions.SetAsync("legacy-session", default);
     await sessions.SetAsync("other-session", default, "homelab");
     await sessions.SetAsync("approved-session", default, "homelab", true);
@@ -966,6 +1661,7 @@ static async Task ConversationsAndQueue()
     Assert(await sessions.GetAsync(default, "homelab") is null && await sessions.GetAsync(default, "homelab", true) is null);
     await Throws<InvalidDataException>(() => sessions.SetAsync("x", default, "../escape"));
     var data = new JournalData();
+
     data.Jobs.Add(new Job(1, 123, "running", true));
     data.Jobs.Add(new Job(2, 123, "waiting"));
     data.Jobs.Add(new Job(3, 123, "next"));
@@ -988,19 +1684,25 @@ static async Task ConversationsAndQueue()
     BotCommands.Apply(data, 123, "/clear", false);
     Assert(data.Jobs.Count == 1 && data.Jobs[0].Running);
     var legacy = JsonSerializer.Deserialize<JournalData>("{\"Offset\":4,\"Jobs\":[{\"Id\":4,\"ChatId\":123,\"Text\":\"hello\"}],\"Replies\":[]}")!;
+
     Assert(legacy.ActiveConversation == "default" && legacy.Jobs[0].Conversation == "default" && legacy.Schedules.Count == 0);
 }
 
 static Task Schedules()
 {
     var now = DateTimeOffset.Parse("2026-09-21T12:00:00Z");
+
     Assert(Scheduling.Next("every 30m", now) == now.AddMinutes(30));
     Assert(Scheduling.Next("daily 08:00 Europe/London", now) == DateTimeOffset.Parse("2026-09-22T07:00:00Z"));
     Assert(Scheduling.Next("weekly sat 08:00 UTC", now) == DateTimeOffset.Parse("2026-09-26T08:00:00Z"));
     // A repeated local hour runs once; a nonexistent local time is skipped.
     Assert(Scheduling.Next("daily 01:30 Europe/London", DateTimeOffset.Parse("2026-10-25T00:45:00Z")) == DateTimeOffset.Parse("2026-10-26T01:30:00Z"));
     Assert(Scheduling.Next("daily 01:30 Europe/London", DateTimeOffset.Parse("2026-03-28T12:00:00Z")) == DateTimeOffset.Parse("2026-03-30T00:30:00Z"));
-    var data = new JournalData { Approvals = true };
+    var data = new JournalData
+    {
+        Approvals = true
+    };
+
     data.Schedules.Add(new Schedule("s", 123, "check", "homelab", "every 30m", now.AddDays(-4)));
     Scheduling.EnqueueDue(data, now, false);
     Assert(data.Jobs.Count == 1 && data.Jobs[0].Conversation == "homelab" && data.Jobs[0].ApprovalRequired);
@@ -1013,6 +1715,7 @@ static Task Schedules()
     BotCommands.Apply(data, 123, "/schedule pause s", false);
     Assert(data.Jobs.Count == 0 && data.Schedules[0].Paused);
     var roundtrip = JsonSerializer.Deserialize<JournalData>(JsonSerializer.Serialize(data))!;
+
     Assert(roundtrip.Schedules[0].Paused && roundtrip.NextScheduledId == -2);
     return Task.CompletedTask;
 }
@@ -1021,6 +1724,7 @@ static async Task Approvals()
 {
     using var fixture = new Fixture();
     var journal = new Journal(fixture.Options);
+
     await journal.InitializeAsync(default);
     var broker = new ApprovalBroker(journal);
     var sessions = new SessionStore(fixture.Options);
@@ -1028,9 +1732,17 @@ static async Task Approvals()
     using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
     var run = runner.RunAsync("test", stop.Token, approve: (m, d, ct) => broker.RequestAsync(123, "default", m, d, ct));
     JournalData state;
-    do { await Task.Delay(20); state = await journal.SnapshotAsync(default); } while (state.Replies.Count == 0 && !run.IsCompleted);
+
+    do
+    {
+        await Task.Delay(20);
+        state = await journal.SnapshotAsync(default);
+    }
+    while (state.Replies.Count == 0 && !run.IsCompleted);
+
     Assert(!run.IsCompleted && !File.Exists(Path.Combine(fixture.Root, "approved.txt")), "Command ran before approval");
     var nonce = state.Replies[0].Buttons![0][0].Data.Split(':')[1];
+
     Assert(!broker.Decide(nonce, 999, true), "Wrong chat could approve");
     Assert(broker.Decide(nonce, 123, true));
     Assert(!broker.Decide(nonce, 123, true), "Approval replay accepted");
@@ -1041,7 +1753,12 @@ static async Task Approvals()
     Assert(!File.Exists(Path.Combine(fixture.Root, "approved.txt")));
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "fileapproval");
     var sawDiff = false;
-    await runner.RunAsync("file", stop.Token, approve: (_, d, _) => { sawDiff = d.GetProperty("proposal").GetProperty("changes")[0].GetProperty("diff").GetString() == "+hello"; return Task.FromResult(false); });
+
+    await runner.RunAsync("file", stop.Token, approve: (_, d, _) =>
+    {
+        sawDiff = d.GetProperty("proposal").GetProperty("changes")[0].GetProperty("diff").GetString() == "+hello";
+        return Task.FromResult(false);
+    });
     Assert(sawDiff, "File approval omitted the proposed patch");
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "unsupported");
     Assert(await runner.RunAsync("unknown", stop.Token, approve: (_, _, _) => throw new Exception("Unknown request was approved")) == "decline");
@@ -1049,19 +1766,28 @@ static async Task Approvals()
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "normal");
     using var cancelled = new CancellationTokenSource();
     var blocked = runner.RunAsync("cancel approval", cancelled.Token, approve: (m, d, ct) => broker.RequestAsync(123, "default", m, d, ct));
-    for (var i = 0; i < 200 && broker.Count == 0; i++) await Task.Delay(10);
+
+    for (var i = 0; i < 200 && broker.Count == 0; i++)
+    {
+        await Task.Delay(10);
+    }
+
     Assert(broker.Count == 1);
     cancelled.Cancel();
     await Throws<OperationCanceledException>(() => blocked);
     Assert(broker.Count == 0 && !File.Exists(Path.Combine(fixture.Root, "approved.txt")));
     Assert((await journal.SnapshotAsync(default)).Replies.All(r => r.Buttons is null));
-    using var oversized = JsonDocument.Parse(JsonSerializer.Serialize(new { command = new string('x', 3000) }));
+    using var oversized = JsonDocument.Parse(JsonSerializer.Serialize(new
+    {
+        command = new string('x', 3000)
+    }));
+
     Assert(!await broker.RequestAsync(123, "default", "command", oversized.RootElement, stop.Token));
     Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "reject-thread");
+
     try
     {
-        await runner.RunAsync("test protocol error", stop.Token, conversation: "reject",
-            approve: (_, _, _) => throw new Exception("Rejected setup must never reach an approval callback"));
+        await runner.RunAsync("test protocol error", stop.Token, conversation: "reject", approve: (_, _, _) => throw new Exception("Rejected setup must never reach an approval callback"));
         throw new Exception("Expected a stage-specific protocol error");
     }
     catch (AppServerException ex)
@@ -1074,25 +1800,57 @@ static async Task Approvals()
 static async Task Attachments()
 {
     using var fixture = new Fixture();
-    var message = new TelegramMessage(new TelegramUser(123), new TelegramChat(123, "private"), null,
-        Document: new TelegramDocument("id", "report.txt", "text/plain", 10));
+    var message = new TelegramMessage(new TelegramUser(123), new TelegramChat(123, "private"), null, Document: new TelegramDocument("id", "report.txt", "text/plain", 10));
+
     Assert(AttachmentStore.Read(message).Single().Name == "report.txt");
-    await Throws<ArgumentException>(() => { AttachmentStore.Read(message with { Document = message.Document! with { FileSize = TelegramClient.FileLimit + 1 } }); return Task.CompletedTask; });
-    await Throws<ArgumentException>(() => { AttachmentStore.Read(message with { Document = message.Document! with { FileName = "program.exe" } }); return Task.CompletedTask; });
+    await Throws<ArgumentException>(() =>
+    {
+        AttachmentStore.Read(message with
+        {
+            Document = message.Document! with
+            {
+                FileSize = TelegramClient.FileLimit + 1
+            }
+        });
+        return Task.CompletedTask;
+    });
+    await Throws<ArgumentException>(() =>
+    {
+        AttachmentStore.Read(message with
+        {
+            Document = message.Document! with
+            {
+                FileName = "program.exe"
+            }
+        });
+        return Task.CompletedTask;
+    });
     await File.WriteAllTextAsync(Path.Combine(fixture.Root, "report.txt"), "test report");
     Assert(AttachmentStore.ResolveExport(fixture.Root, "report.txt").EndsWith("report.txt"));
-    await Throws<ArgumentException>(() => { AttachmentStore.ResolveExport(fixture.Root, "../escape"); return Task.CompletedTask; });
+    await Throws<ArgumentException>(() =>
+    {
+        AttachmentStore.ResolveExport(fixture.Root, "../escape");
+        return Task.CompletedTask;
+    });
     File.CreateSymbolicLink(Path.Combine(fixture.Root, "link.txt"), Path.Combine(fixture.Root, "report.txt"));
-    await Throws<ArgumentException>(() => { AttachmentStore.ResolveExport(fixture.Root, "link.txt"); return Task.CompletedTask; });
-    using var http = new HttpClient(new Handler((request, _) => Task.FromResult(request.RequestUri!.AbsolutePath.Contains("getFile")
-        ? Response(200, "{\"ok\":true,\"result\":{\"file_path\":\"documents/file.txt\",\"file_size\":11}}")
-        : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("test report") })));
+    await Throws<ArgumentException>(() =>
+    {
+        AttachmentStore.ResolveExport(fixture.Root, "link.txt");
+        return Task.CompletedTask;
+    });
+    using var http = new HttpClient(new Handler((request, _) => Task.FromResult(request.RequestUri!.AbsolutePath.Contains("getFile") ? Response(200, "{\"ok\":true,\"result\":{\"file_path\":\"documents/file.txt\",\"file_size\":11}}") : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("test report") })));
     var store = new AttachmentStore(fixture.Options, new TelegramClient(http, fixture.Options));
     var prepared = await store.PrepareAsync(new Job(1, 123, "inspect", Attachments: AttachmentStore.Read(message)), default);
+
     Assert(prepared.Prompt.Contains("untrusted input") && prepared.Images.Length == 0);
-    using (var fifo = Process.Start(new ProcessStartInfo("mkfifo") { ArgumentList = { Path.Combine(fixture.Root, "pipe") } })!) await fifo.WaitForExitAsync();
+    using (var fifo = Process.Start(new ProcessStartInfo("mkfifo") { ArgumentList = { Path.Combine(fixture.Root, "pipe") } })!)
+    {
+        await fifo.WaitForExitAsync();
+    }
+
     await Throws<ArgumentException>(() => store.ExportAsync("pipe", default));
     var exported = await store.ExportAsync("report.txt", default);
+
     Assert(await File.ReadAllTextAsync(exported) == "test report");
     store.Cleanup(1);
     Assert(!Directory.Exists(Path.Combine(fixture.Options.StateDirectory, "attachments", "1")));
@@ -1102,32 +1860,58 @@ sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpRespon
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) => action(request, token);
 }
+
 sealed class Fixture : IDisposable
 {
     readonly Dictionary<string, string?> saved = new();
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "bloodraven-test-" + Guid.NewGuid().ToString("N"));
-    public AppOptions Options { get; }
+    public AppOptions Options
+    {
+        get;
+    }
+
     public Fixture()
     {
         Directory.CreateDirectory(Root);
         var fake = Path.Combine(AppContext.BaseDirectory, "fake-codex.py");
-        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(fake, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(fake, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
         var values = new Dictionary<string, string?>
         {
-            ["BLOODRAVEN_TELEGRAM_BOT_TOKEN"] = "test-secret", ["BLOODRAVEN_ALLOWED_USER_ID"] = "123",
-            ["BLOODRAVEN_ALLOWED_CHAT_ID"] = "123", ["BLOODRAVEN_WORKING_DIRECTORY"] = Root,
-            ["BLOODRAVEN_STATE_DIRECTORY"] = Path.Combine(Root, "state"), ["BLOODRAVEN_CODEX_EXECUTABLE"] = fake,
-            ["BLOODRAVEN_CODEX_SANDBOX"] = "workspace-write", ["BLOODRAVEN_TASK_TIMEOUT_SECONDS"] = "30",
-            ["TEST_CODEX_MODE"] = "normal", ["TEST_PID_FILE"] = null,
+            ["BLOODRAVEN_TELEGRAM_BOT_TOKEN"] = "test-secret",
+            ["BLOODRAVEN_ALLOWED_USER_ID"] = "123",
+            ["BLOODRAVEN_ALLOWED_CHAT_ID"] = "123",
+            ["BLOODRAVEN_WORKING_DIRECTORY"] = Root,
+            ["BLOODRAVEN_STATE_DIRECTORY"] = Path.Combine(Root, "state"),
+            ["BLOODRAVEN_CODEX_EXECUTABLE"] = fake,
+            ["BLOODRAVEN_CODEX_SANDBOX"] = "workspace-write",
+            ["BLOODRAVEN_TASK_TIMEOUT_SECONDS"] = "30",
+            ["TEST_CODEX_MODE"] = "normal",
+            ["TEST_PID_FILE"] = null,
             ["BLOODRAVEN_PROGRESS_INTERVAL_SECONDS"] = null,
             ["BLOODRAVEN_APPROVALS"] = null,
         };
-        foreach (var (key, value) in values) { saved[key] = Environment.GetEnvironmentVariable(key); Environment.SetEnvironmentVariable(key, value); }
+
+        foreach (var (key, value) in values)
+        {
+            saved[key] = Environment.GetEnvironmentVariable(key);
+            Environment.SetEnvironmentVariable(key, value);
+        }
+
         Options = new AppOptions();
     }
+
     public void Dispose()
     {
-        foreach (var (key, value) in saved) Environment.SetEnvironmentVariable(key, value);
+        foreach (var (key, value) in saved)
+        {
+            Environment.SetEnvironmentVariable(key, value);
+        }
+
         Directory.Delete(Root, true);
     }
 }

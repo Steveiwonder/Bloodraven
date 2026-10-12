@@ -1,4 +1,5 @@
 """Stage immutable releases and restore the previous unit on activation failure."""
+
 import argparse
 import os
 from pathlib import Path
@@ -12,7 +13,15 @@ import time
 def unit_quote(value):
     if any(c in value for c in "\n\r\0"):
         raise ValueError("Invalid newline or NUL in systemd value")
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+
+    return (
+        '"'
+        + value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("%", "%%")
+        .replace("$", "$$")
+        + '"'
+    )
 
 
 def service_text(user, group, home, dotnet, executable, path, config, state):
@@ -52,6 +61,7 @@ def unit_path(value):
     value = str(value)
     if not value.startswith("/") or any(c in value for c in "\n\r\0"):
         raise ValueError("Expected an absolute systemd path without control characters")
+
     return value.replace("%", "%%")
 
 
@@ -66,10 +76,12 @@ class Systemd:
             # A previous broken upgrade may have left an invalid/unloaded unit.
             # Only tolerate failed stops when systemd confirms it is not active.
             if args == ("stop", "bloodraven"):
-                status = subprocess.run(["systemctl", "is-active", "--quiet", "bloodraven"],
-                                        check=False).returncode
+                status = subprocess.run(
+                    ["systemctl", "is-active", "--quiet", "bloodraven"], check=False
+                ).returncode
                 if status in (3, 4):
                     return
+
             raise
 
     def healthy(self, ready):
@@ -81,7 +93,9 @@ class Systemd:
                 time.sleep(3)
                 self.run("is-active", "--quiet", "bloodraven")
                 return
+
             time.sleep(1)
+
         raise RuntimeError("No successful Telegram poll within 45 seconds")
 
 
@@ -94,21 +108,26 @@ def deploy(publish, root, unit, state, render, systemd):
     release = Path(tempfile.mkdtemp(prefix="release-", dir=releases))
     # copytree (not cp -a) retains root ownership when run by sudo.
     shutil.copytree(publish, release, dirs_exist_ok=True)
+
     for directory, _, files in os.walk(release):
         os.chmod(directory, 0o755)
+
         for name in files:
             item = Path(directory) / name
             os.chmod(item, 0o755 if os.access(item, os.X_OK) else 0o644)
+
     previous = unit.read_bytes() if unit.exists() else None
     backup = release / "previous.service"
     if previous is not None:
         backup.write_bytes(previous)
+
     candidate = release / "bloodraven.service"
     candidate.write_text(render(release / "Bloodraven.dll"))
     # Reject invalid candidates before disrupting the current service.
     systemd.verify(candidate)
     ready = state / "ready"
     activation_started = False
+
     try:
         activation_started = True
         systemd.run("stop", "bloodraven") if previous is not None else None
@@ -124,44 +143,68 @@ def deploy(publish, root, unit, state, render, systemd):
     except BaseException:
         if activation_started:
             stop_error = None
+
             try:
                 systemd.run("stop", "bloodraven")
             except Exception as error:
                 stop_error = error
+
             if previous is not None:
                 temporary = unit.with_suffix(".service.pending")
                 temporary.write_bytes(previous)
                 os.replace(temporary, unit)
             else:
                 unit.unlink(missing_ok=True)
+
             systemd.run("daemon-reload")
             if stop_error is not None:
-                raise RuntimeError("Previous unit restored, but stopping the service failed; manual recovery is required") from stop_error
+                raise RuntimeError(
+                    "Previous unit restored, but stopping the service failed; manual recovery is required"
+                ) from stop_error
+
             if previous is not None:
                 systemd.run("start", "bloodraven")
+
         raise
+
     return release
 
 
 def main():
     parser = argparse.ArgumentParser()
+
     for name in ("publish", "user", "group", "dotnet", "path"):
         parser.add_argument(name)
+
     args = parser.parse_args()
     if os.geteuid() != 0:
-        parser.error("Deployment must be invoked through sudo by the installation scripts")
+        parser.error(
+            "Deployment must be invoked through sudo by the installation scripts"
+        )
+
     home = pwd.getpwnam(args.user).pw_dir
     safe_path = ":".join(p for p in args.path.split(":") if p.startswith("/"))
     safe_path += ":/usr/local/bin:/usr/bin:/bin"
     config, state = Path("/etc/bloodraven/bloodraven.env"), Path("/var/lib/bloodraven")
-    renderer = lambda executable: service_text(args.user, args.group, home, args.dotnet,
-                                               executable, safe_path, config, state)
+    renderer = lambda executable: service_text(
+        args.user, args.group, home, args.dotnet, executable, safe_path, config, state
+    )
+
     try:
-        release = deploy(Path(args.publish), Path("/opt/bloodraven"),
-                         Path("/etc/systemd/system/bloodraven.service"), state, renderer, Systemd())
+        release = deploy(
+            Path(args.publish),
+            Path("/opt/bloodraven"),
+            Path("/etc/systemd/system/bloodraven.service"),
+            state,
+            renderer,
+            Systemd(),
+        )
     except Exception:
-        print("Activation failed; rollback was attempted. Check 'sudo systemctl status bloodraven'. Previous unit backups remain under /opt/bloodraven/releases.")
+        print(
+            "Activation failed; rollback was attempted. Check 'sudo systemctl status bloodraven'. Previous unit backups remain under /opt/bloodraven/releases."
+        )
         raise SystemExit(1) from None
+
     print(f"Activated {release}. Previous releases and configuration were retained.")
 
 

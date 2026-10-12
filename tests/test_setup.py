@@ -20,122 +20,194 @@ setup, deploy = module("setup"), module("deploy")
 
 class PairingTests(unittest.TestCase):
     def test_optional_approval_prompt(self):
-        with patch('builtins.input', side_effect=['invalid', 'ON']):
-            self.assertEqual(setup.prompt_approvals(), 'on')
-        with patch('builtins.input', return_value=''):
-            self.assertEqual(setup.prompt_approvals(), 'off')
+        with patch("builtins.input", side_effect=["invalid", "ON"]):
+            self.assertEqual(setup.prompt_approvals(), "on")
+
+        with patch("builtins.input", return_value=""):
+            self.assertEqual(setup.prompt_approvals(), "off")
 
     def test_progress_validation(self):
-        for value in ('0', '10', '30', '3600'):
+        for value in ("0", "10", "30", "3600"):
             self.assertEqual(setup.validate_progress(value), value)
-        for value in ('-1', '1', '3601', 'oops', '1\nUser=root'):
+
+        for value in ("-1", "1", "3601", "oops", "1\nUser=root"):
             self.assertRaises(ValueError, setup.validate_progress, value)
 
     def test_progress_upgrade_preserves_secrets_and_other_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'settings.env'
+            path = Path(tmp) / "settings.env"
             original = 'BLOODRAVEN_TELEGRAM_BOT_TOKEN="secret"\nBLOODRAVEN_WORKING_DIRECTORY="/repo with spaces"\n'
             path.write_text(original)
-            with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='60'):
+
+            with patch.object(setup.sys.stdin, "isatty", return_value=True), patch(
+                "builtins.input", return_value="60"
+            ):
                 setup.progress_config(path)
+
             self.assertTrue(path.read_text().startswith(original))
             self.assertIn('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"', path.read_text())
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             before = path.read_bytes()
-            with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=AssertionError('Must not prompt twice')):
+
+            with patch.object(setup.sys.stdin, "isatty", return_value=True), patch(
+                "builtins.input", side_effect=AssertionError("Must not prompt twice")
+            ):
                 setup.progress_config(path)
+
             self.assertEqual(path.read_bytes(), before)
 
     def test_interactive_upgrade_keeps_saved_interval_including_disabled(self):
-        for value in ('0', '15', '3600'):
+        for value in ("0", "15", "3600"):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / 'settings.env'
+                path = Path(tmp) / "settings.env"
                 path.write_text(f'BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="{value}"\n')
                 before = path.read_bytes()
-                with patch.object(setup.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=AssertionError('Saved setting must not prompt')):
+
+                with patch.object(setup.sys.stdin, "isatty", return_value=True), patch(
+                    "builtins.input",
+                    side_effect=AssertionError("Saved setting must not prompt"),
+                ):
                     setup.progress_config(path)
+
                 self.assertEqual(path.read_bytes(), before)
 
     def test_noninteractive_missing_interval_does_not_prompt_or_modify_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'settings.env'
-            path.write_text('# Existing settings\n')
+            path = Path(tmp) / "settings.env"
+            path.write_text("# Existing settings\n")
             before = path.read_bytes()
-            with patch.object(setup.sys.stdin, 'isatty', return_value=False), patch('builtins.input', side_effect=AssertionError):
+
+            with patch.object(setup.sys.stdin, "isatty", return_value=False), patch(
+                "builtins.input", side_effect=AssertionError
+            ):
                 setup.progress_config(path)
+
             self.assertEqual(path.read_bytes(), before)
 
     def test_noninteractive_upgrade_keeps_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'settings.env'
+            path = Path(tmp) / "settings.env"
             path.write_text('BLOODRAVEN_PROGRESS_INTERVAL_SECONDS="60"\n')
             before = path.read_bytes()
-            with patch.object(setup.sys.stdin, 'isatty', return_value=False), patch('builtins.input', side_effect=AssertionError):
+
+            with patch.object(setup.sys.stdin, "isatty", return_value=False), patch(
+                "builtins.input", side_effect=AssertionError
+            ):
                 setup.progress_config(path)
+
             self.assertEqual(path.read_bytes(), before)
 
     def message(self, user=123, text="/start nonce", date=100, kind="private"):
-        return {"message": {"from": {"id": user}, "chat": {"id": user, "type": kind},
-                            "text": text, "date": date}}
+        return {
+            "message": {
+                "from": {"id": user},
+                "chat": {"id": user, "type": kind},
+                "text": text,
+                "date": date,
+            }
+        }
 
     def test_unrelated_latest_sender_not_authorised(self):
         updates = [self.message(), self.message(user=999, text="/start")]
         self.assertEqual(setup.matching_owners(updates, "nonce", 100), {(123, 123)})
 
     def test_reject_stale_group_and_wrong_code(self):
-        updates = [self.message(date=1), self.message(kind="group"), self.message(text="/start wrong")]
+        updates = [
+            self.message(date=1),
+            self.message(kind="group"),
+            self.message(text="/start wrong"),
+        ]
         self.assertEqual(setup.matching_owners(updates, "nonce", 100), set())
 
     def test_multiple_candidates_require_rejection(self):
-        self.assertEqual(len(setup.matching_owners([self.message(), self.message(user=999)], "nonce", 100)), 2)
+        self.assertEqual(
+            len(
+                setup.matching_owners(
+                    [self.message(), self.message(user=999)], "nonce", 100
+                )
+            ),
+            2,
+        )
 
     def test_relative_override_uses_invocation_directory(self):
-        self.assertEqual(setup.resolve_directory("../repo two", "/home/user/repo"), "/home/user/repo two")
+        self.assertEqual(
+            setup.resolve_directory("../repo two", "/home/user/repo"),
+            "/home/user/repo two",
+        )
 
     def test_environment_quotes(self):
-        self.assertEqual(setup.env_quote('a "b" \\ c'), '"a \\"b\\" \\\\ c"'.replace('\\\\"', '\\"'))
+        self.assertEqual(
+            setup.env_quote('a "b" \\ c'), '"a \\"b\\" \\\\ c"'.replace('\\\\"', '\\"')
+        )
         self.assertRaises(ValueError, setup.env_quote, "line\nINJECT=yes")
 
     def test_unit_quotes_and_environment(self):
-        text = deploy.service_text("user", "group", "/home/user", "/home/user/.dotnet/dotnet",
-                                   Path('/opt/release a/Bloodraven.dll'), "/home/user/node/bin:/usr/bin",
-                                   Path("/etc/bloodraven/bloodraven.env"), Path("/var/lib/bloodraven"))
-        self.assertIn('ExecStart="/home/user/.dotnet/dotnet" "/opt/release a/Bloodraven.dll"', text)
+        text = deploy.service_text(
+            "user",
+            "group",
+            "/home/user",
+            "/home/user/.dotnet/dotnet",
+            Path("/opt/release a/Bloodraven.dll"),
+            "/home/user/node/bin:/usr/bin",
+            Path("/etc/bloodraven/bloodraven.env"),
+            Path("/var/lib/bloodraven"),
+        )
+        self.assertIn(
+            'ExecStart="/home/user/.dotnet/dotnet" "/opt/release a/Bloodraven.dll"',
+            text,
+        )
         self.assertIn("ExecStartPre=", text)
         self.assertIn("PATH=/home/user/node/bin:/usr/bin", text)
         self.assertEqual(deploy.unit_quote("a%$b"), '"a%%$$b"')
-        self.assertIn('WorkingDirectory=/opt/release a\n', text)
-        self.assertIn('EnvironmentFile=/etc/bloodraven/bloodraven.env\n', text)
+        self.assertIn("WorkingDirectory=/opt/release a\n", text)
+        self.assertIn("EnvironmentFile=/etc/bloodraven/bloodraven.env\n", text)
 
     def test_generated_unit_passes_real_systemd_validator(self):
         with tempfile.TemporaryDirectory() as tmp:
             unit = Path(tmp) / "bloodraven.service"
-            text = deploy.service_text("root", "root", "/root", "/usr/bin/true",
-                                       Path('/opt/release a%/Bloodraven.dll'), '/usr/bin:/bin',
-                                       Path('/etc/bloodraven/bloodraven.env'), Path('/var/lib/bloodraven'))
+            text = deploy.service_text(
+                "root",
+                "root",
+                "/root",
+                "/usr/bin/true",
+                Path("/opt/release a%/Bloodraven.dll"),
+                "/usr/bin:/bin",
+                Path("/etc/bloodraven/bloodraven.env"),
+                Path("/var/lib/bloodraven"),
+            )
             unit.write_text(text)
             deploy.Systemd().verify(unit)
             # Demonstrate that this test detects the original quoting regression.
-            unit.write_text(text.replace('WorkingDirectory=/opt/release a%%',
-                                         'WorkingDirectory="/opt/release a%%"'))
-            result = subprocess.run(['systemd-analyze', 'verify', str(unit)], capture_output=True)
+            unit.write_text(
+                text.replace(
+                    "WorkingDirectory=/opt/release a%%",
+                    'WorkingDirectory="/opt/release a%%"',
+                )
+            )
+            result = subprocess.run(
+                ["systemd-analyze", "verify", str(unit)], capture_output=True
+            )
             self.assertNotEqual(result.returncode, 0)
 
     def test_invalid_paths_rejected(self):
-        for path in ('relative', '/tmp/new\nUser=root', '/tmp/\0file'):
+        for path in ("relative", "/tmp/new\nUser=root", "/tmp/\0file"):
             with self.assertRaises(ValueError):
                 deploy.unit_path(path)
 
     def test_failed_stop_only_tolerated_for_inactive_or_missing_unit(self):
         for status in (0, 1, 3, 4):
-            with self.subTest(status=status), patch.object(deploy.subprocess, 'run') as run:
-                run.side_effect = [subprocess.CalledProcessError(1, 'systemctl'),
-                                   subprocess.CompletedProcess([], status)]
+            with self.subTest(status=status), patch.object(
+                deploy.subprocess, "run"
+            ) as run:
+                run.side_effect = [
+                    subprocess.CalledProcessError(1, "systemctl"),
+                    subprocess.CompletedProcess([], status),
+                ]
                 if status in (3, 4):
-                    deploy.Systemd().run('stop', 'bloodraven')
+                    deploy.Systemd().run("stop", "bloodraven")
                 else:
                     with self.assertRaises(subprocess.CalledProcessError):
-                        deploy.Systemd().run('stop', 'bloodraven')
+                        deploy.Systemd().run("stop", "bloodraven")
 
 
 class FakeSystemd:
@@ -151,9 +223,11 @@ class FakeSystemd:
 
     def run(self, *args):
         self.calls.append(args)
-        if self.fail == "rollback-stop" and (args[0] == "start" or
-                (args[0] == "stop" and self.calls.count(args) == 2)):
+        if self.fail == "rollback-stop" and (
+            args[0] == "start" or (args[0] == "stop" and self.calls.count(args) == 2)
+        ):
             raise RuntimeError("Injected start/rollback stop failure")
+
         if self.fail == args[0] and not self.failed:
             self.failed = True
             raise RuntimeError("Injected activation failure")
@@ -176,11 +250,13 @@ class DeploymentTests(unittest.TestCase):
             (publish / "Bloodraven.dll").write_text("new binary")
             if existing:
                 unit.write_text("old service")
+
             systemd = FakeSystemd(failure)
             render = lambda executable: f"new service {executable}"
             if failure:
                 with self.assertRaises(RuntimeError):
                     deploy.deploy(publish, root, unit, state, render, systemd)
+
                 if existing:
                     self.assertEqual(unit.read_text(), "old service")
                     if failure == "verify":
@@ -197,15 +273,30 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual((release / "Bloodraven.dll").read_text(), "new binary")
                 self.assertEqual(systemd.calls[-1], ("enable", "bloodraven"))
                 if existing:
-                    self.assertEqual((release / "previous.service").read_text(), "old service")
+                    self.assertEqual(
+                        (release / "previous.service").read_text(), "old service"
+                    )
 
-    def test_success_preserves_previous_service(self): self.exercise()
-    def test_failed_start_restores_service(self): self.exercise("start")
-    def test_failed_health_restores_service(self): self.exercise("health")
-    def test_failed_enable_restores_service(self): self.exercise("enable")
-    def test_failed_first_install_removes_only_new_unit(self): self.exercise("health", existing=False)
-    def test_invalid_candidate_does_not_stop_previous_service(self): self.exercise("verify")
-    def test_failed_rollback_stop_still_restores_previous_unit(self): self.exercise("rollback-stop")
+    def test_success_preserves_previous_service(self):
+        self.exercise()
+
+    def test_failed_start_restores_service(self):
+        self.exercise("start")
+
+    def test_failed_health_restores_service(self):
+        self.exercise("health")
+
+    def test_failed_enable_restores_service(self):
+        self.exercise("enable")
+
+    def test_failed_first_install_removes_only_new_unit(self):
+        self.exercise("health", existing=False)
+
+    def test_invalid_candidate_does_not_stop_previous_service(self):
+        self.exercise("verify")
+
+    def test_failed_rollback_stop_still_restores_previous_unit(self):
+        self.exercise("rollback-stop")
 
 
 if __name__ == "__main__":
