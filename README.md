@@ -13,9 +13,9 @@ Bloodraven is a small, self-hosted Telegram interface for the OpenAI Codex CLI. 
 - Silently ignores every user except the configured numeric Telegram user ID
 - Runs `codex exec --json` inside a Git repository
 - Saves the exact Codex session ID and resumes it on later messages
-- Persists queued messages and replies across restarts, running one Codex task at a time
+- Persists queued messages and replies across restarts, running one Codex task at a time **per conversation**, with different conversations running concurrently
 - Converts common Markdown formatting to Telegram HTML automatically
-- Keeps named Codex conversations, a controllable queue, and durable recurring schedules
+- Keeps named Codex conversations, a separate controllable queue for each conversation, and durable recurring schedules
 - Accepts photos/documents and returns repository files on request
 - Edits one progress message per task and sends the complete final answer separately
 - Offers native Codex approval buttons and `/health` diagnostics
@@ -140,11 +140,19 @@ bash bloodraven-install.sh
 
 Ordinary text goes to Codex as prompt data, never as CLI arguments. Unknown slash commands are rejected with help; native interactive Codex slash commands are not implemented.
 
+### Concurrent conversations (0.4.0)
+
+Existing sessions and pending jobs are retained on upgrade. Queued jobs keep their original conversation and order. Running jobs interrupted by the upgrade are reported as interrupted and are not replayed automatically.
+
 ### Named conversations
 
 Send `/conversation homelab`, then your request. Use `/conversation research` for another history, and `/conversations` to switch back. Conversation names use 1–32 lowercase letters, digits, underscores or hyphens; up to 30 are supported. Your existing conversation becomes **default** automatically.
 
-All conversations use the working repository chosen during installation, including its `AGENTS.md` instructions. One task runs at a time. Each task remembers the conversation selected when it was queued; switching conversations never redirects waiting work. `/new` resets only that conversation and follows queue order.
+All conversations use the working repository chosen during installation, including its `AGENTS.md` instructions. One task runs at a time per conversation; different conversations run concurrently. Switching conversations selects where new messages and commands apply and does not stop work elsewhere. `/cancel`, `/queue`, `/clear`, `/front`, `/remove`, `/status`, `/timings`, `/btw`, `/approvals`, and schedule controls target the selected conversation. Task IDs and old buttons cannot modify another conversation's work. `/conversations` remains the global conversation selector. The pending-reply count is labelled as global because Telegram delivery is shared.
+
+All conversations still share the configured working directory and service account. Concurrent changes to the same files or deployments can conflict; conversation queues do not create isolated checkouts. Each conversation can hold 20 tasks, and the existing limit of 30 conversations bounds concurrent main tasks. Each can also have one BTW question. Telegram replies remain globally paced.
+
+Each task remembers the conversation selected when it was queued; switching conversations never redirects waiting work. `/new` resets only that conversation and follows queue order.
 
 ### Photos and documents
 
@@ -165,7 +173,7 @@ Examples:
 
 Intervals accept `m`, `h`, or `d`, from one minute to one year. Daily and weekly times use the timezone you supply; weekly days are `mon` through `sun`. The list includes pause/resume/delete buttons, or use `/schedule pause ID`, `/schedule resume ID`, and `/schedule delete ID`. Up to 20 schedules are supported.
 
-Schedules remember their conversation and survive service restarts. Due tasks join the normal queue and use the current approval setting. A schedule cannot overlap itself. After downtime, missed occurrences become at most one queued run per schedule, rather than a burst of old work. Spring-forward times that do not exist are skipped; a repeated autumn time runs once. Pausing/deleting removes that schedule's pending tasks but does not cancel one already running. Resuming calculates the next future occurrence.
+Schedules remember their conversation and survive service restarts. Due tasks join their conversation’s queue and use that conversation’s approval setting. A schedule cannot overlap itself. After downtime, missed occurrences become at most one queued run per schedule, rather than a burst of old work. Spring-forward times that do not exist are skipped; a repeated autumn time runs once. Pausing/deleting removes that schedule's pending tasks but does not cancel one already running. Resuming calculates the next future occurrence.
 
 ### Approval buttons
 
@@ -173,7 +181,7 @@ Send `/approvals on` to enable this optional mode. Bloodraven starts **Codex app
 
 This is Codex's native approval boundary, not a filter that guesses whether every operation is dangerous. Trusted read-only commands may run without asking. Existing Codex execution rules and external MCP tools affect what Codex asks to approve; external tools can have permissions outside the command sandbox. Review those tools and rules before relying on approval mode for sensitive administration. The service's systemd restrictions still apply after approval.
 
-Approval mode uses a separate session history for each conversation. Turning it on also upgrades pending tasks to require this mode; turning it off applies only to newly queued tasks. Running work keeps the policy it started with. `/approvals` shows the setting, which is saved across restarts. Existing installations keep approvals off unless explicitly enabled; upgrades do not introduce another prompt. The installation environment default is `BLOODRAVEN_APPROVALS="off"`; a saved `/approvals` choice takes precedence.
+Approval mode uses a separate session history for each conversation. The setting is per conversation. Turning it on also upgrades that conversation’s pending tasks to require this mode; turning it off applies only to newly queued tasks. Running work keeps the policy it started with. `/approvals` shows the setting, which is saved across restarts. Existing installations retain their previous global choice as the fallback until a conversation gets its own setting; upgrades do not introduce another prompt. The installation environment default is `BLOODRAVEN_APPROVALS="off"`; a saved `/approvals` choice takes precedence.
 
 Replies support **bold**, italics, strikethrough, inline code, fenced code, headings, HTTP(S) links, and bullet lists through a conservative Markdown-to-HTML formatter. Markdown tables become readable sections: two-column rows use a bold title and description; wider tables use a bold title and labelled fields. Links stay clickable, and tables inside fenced code stay unchanged. Unsupported or unmatched syntax remains readable text. Raw HTML is escaped, links do not generate previews, and each long-message chunk has complete formatting tags without splitting emoji. If Telegram rejects HTML parsing, the affected chunk is sent as plain text. This is not a full CommonMark renderer; complex nesting may remain plain text.
 
@@ -211,7 +219,7 @@ Approval mode stays enforced if setup fails. Errors now identify the app-server 
 
 ### Progress during long tasks
 
-While Codex works, Bloodraven edits its single working message every 30 seconds by default, showing elapsed time, completed/running command counts, up to two running commands and how long they have been observed, recent command completions with exit codes, and short excerpts of newly reported command output. Only the latest three details are retained per interval. When nothing new is reported, the update says so. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress. Output is available only when Codex emits it, which may be after a command finishes. Counts cover up to 1,024 command IDs per task; an update labels that limit if reached.
+While Codex works, Bloodraven edits each task’s working message every 30 seconds by default, showing elapsed time, completed/running command counts, up to two running commands and how long they have been observed, recent command completions with exit codes, and short excerpts of newly reported command output. Only the latest three details are retained per interval. When nothing new is reported, the update says so. This confirms the bridge is waiting for Codex; it cannot prove that an individual command is making progress. Output is available only when Codex emits it, which may be after a command finishes. Counts cover up to 1,024 command IDs per task; an update labels that limit if reached.
 
 Installation asks for the interval in seconds: **10–3600**, or **0** to disable updates. Upgrades keep a saved value without asking again, including **0**. An interactive upgrade only prompts when the setting is missing; press Enter to accept **30 seconds**. Non-interactive upgrades preserve settings without prompting; when the setting is absent, the application defaults to **30 seconds**.
 
@@ -224,8 +232,8 @@ Command names and output excerpts are shown as code, with length limits and reda
 - Accepted work and Telegram update IDs are stored together in `/var/lib/bloodraven/journal.json` before acknowledgement. Queued tasks survive restarts.
 - A task interrupted while running is **not automatically rerun**: it may already have changed files. The bot reports the interruption; inspect the repository before resubmitting. Other queued tasks continue.
 - Replies are persisted and retried during network failures or Telegram rate limits. A rare duplicate reply is possible if Telegram accepts it immediately before a crash/network timeout; Telegram has no idempotency key for sending messages.
-- The queue holds 20 tasks. A backed-up reply outbox pauses intake/processing to bound resource usage. Telegram only retains pending updates for a limited time (normally 24 hours); prolonged outages are not an unlimited archive.
-- `/cancel` stops the current task, not queued tasks. Tasks time out after one hour by default. Codex JSON lines are limited to 1 MiB and final replies to 100,000 characters; oversized output fails safely.
+- Each conversation’s queue holds 20 tasks. A backed-up reply outbox pauses intake/processing to bound resource usage. Telegram only retains pending updates for a limited time (normally 24 hours); prolonged outages are not an unlimited archive.
+- `/cancel` stops the selected conversation’s current task, leaving its queued tasks and other conversations running. Tasks time out after one hour by default. Codex JSON lines are limited to 1 MiB and final replies to 100,000 characters; oversized output fails safely.
 - Do not delete a corrupt journal just to restart: back it up and investigate. Local state contains prompts and replies, so treat backups as sensitive. Durability protects normal process crashes/restarts; it is not a substitute for disk/filesystem backups or a guarantee against power-loss/storage failures.
 
 ## Configuration
@@ -251,7 +259,7 @@ Each named conversation remembers its own model and reasoning settings. In Teleg
 
 Send `/model` to list models reported by your installed Codex, with buttons to select one. Send `/effort` (or `/reasoning`) to choose a reasoning level. For an explicitly selected model, the menu lists the levels Codex reports for it. If the effective model is inherited or the catalogue is unavailable, the effort menu clearly labels its general, model-dependent list. Manual `/model MODEL_ID` and `/effort LEVEL` commands also work.
 
-Buttons apply to the conversation where the menu was opened, expire after ten minutes or a restart, and reject choices if its saved settings have since changed. Choosing a model with a button clears the previous effort override; use `/effort` to select a compatible level afterwards. The catalogue request never starts a model turn. If model discovery fails, the bot reports it without guessing a model list.
+Buttons require the conversation where the menu was opened to be selected, expire after ten minutes or a restart, and reject choices if its saved settings have since changed. Choosing a model with a button clears the previous effort override; use `/effort` to select a compatible level afterwards. The catalogue request never starts a model turn. If model discovery fails, the bot reports it without guessing a model list.
 
 ```text
 /model
@@ -292,7 +300,7 @@ This follows [Ubuntu’s documented per-application user-namespace approach](htt
 
 ## Scope
 
-Bloodraven 0.3 supports Ubuntu, one authorised bot owner, named conversations sharing one task queue, photos/documents, recurring schedules, per-conversation model/reasoning controls and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
+Bloodraven 0.4 supports Ubuntu, one authorised bot owner, named conversations with independent concurrent queues, photos/documents, recurring schedules, per-conversation model/reasoning controls and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
 
 ## Development
 
@@ -321,7 +329,7 @@ It uses the selected conversation's saved Codex history in a separate fork, with
 selected model/effort. It never replaces the primary session or enters the main job queue.
 The context is a snapshot: activity not yet saved by Codex may be missing.
 
-One side question can be pending at a time. Questions are text-only and time out after
+One side question can be pending per conversation at a time; different conversations can ask concurrently. Questions are text-only and time out after
 five minutes (or the configured task timeout, if shorter). `/cancel` still targets only
 the main task. Side questions have read-only filesystem access, no network access from
 shell tools, disabled MCP servers/apps, and all approval requests are declined. They

@@ -7,6 +7,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("conversation workers run concurrently and commands stay scoped", ConcurrentConversations),
+    ("conversation approval policies and queues survive restart", ConversationRecovery),
+    ("conversation worker failures cancel and drain siblings", ConversationFailure),
     ("BTW forks preserve sessions, deny approvals and recover interrupted questions", SideQuestions),
     ("BTW replies while main task runs and authenticates incoming questions", WorkerSideQuestions),
     ("timing reports measure stages, survive storage and bound retention", TimingReports),
@@ -56,6 +59,137 @@ static async Task Throws<T>(Func<Task> action) where T : Exception
     catch (T) { return; }
     throw new Exception($"Expected {typeof(T).Name}");
 }
+static async Task ConcurrentConversations()
+{
+    using var fixture = new Fixture();
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!) await git.WaitForExitAsync();
+    Environment.SetEnvironmentVariable("TEST_CODEX_MODE", "concurrent");
+    var journal = new Journal(fixture.Options);
+    var sessions = new SessionStore(fixture.Options);
+    var runner = new CodexRunner(fixture.Options, sessions);
+    var updates = new System.Collections.Concurrent.ConcurrentQueue<object>();
+    var sent = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    int nextId = 0;
+    int Send(string text)
+    {
+        var id = ++nextId;
+        updates.Enqueue(new { update_id = id, message = new { from = new { id = 123 }, chat = new { id = 123, type = "private" }, text } });
+        return id;
+    }
+    using var http = new HttpClient(new Handler(async (request, token) => {
+        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
+        {
+            await Task.Delay(20, token);
+            var batch = new List<object>();
+            while (updates.TryDequeue(out var update)) batch.Add(update);
+            return Response(200, JsonSerializer.Serialize(new { ok = true, result = batch }));
+        }
+        if (body.RootElement.TryGetProperty("text", out var text)) sent.Enqueue(WebUtility.HtmlDecode(text.GetString()!));
+        return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
+    }));
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), runner, sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+    async Task Wait(Func<JournalData, bool> condition)
+    {
+        while (!condition(await journal.SnapshotAsync(deadline.Token)))
+        {
+            if (worker.ExecuteTask?.IsCompleted == true) await worker.ExecuteTask;
+            await Task.Delay(20, deadline.Token);
+        }
+    }
+    bool Started(string name) => File.Exists(Path.Combine(fixture.Root, "started-" + name));
+    bool Said(JournalData d, string text) => d.Replies.Any(r => r.Text.Contains(text)) || sent.Any(r => r.Contains(text));
+    await worker.StartAsync(default);
+    try
+    {
+        var a = Send("a-first");
+        var aNext = Send("a-second");
+        Send("/conversation other");
+        var b = Send("b-first");
+        var bNext = Send("b-second");
+        await Wait(d => Started("a-first") && Started("b-first"));
+        Assert(!Started("a-second") && !Started("b-second"), "Same-conversation jobs overlapped");
+        await Throws<InvalidOperationException>(() => runner.RunAsync("duplicate", default));
+        Send("/status");
+        await Wait(d => Said(d, $"Running: {b} (other)") && Said(d, "Waiting: 1"));
+        Send("/timings " + a);
+        await Wait(d => Said(d, "No timing report yet"));
+        Send("/btw question-b");
+        Send("/conversation default");
+        Send("/btw question-a");
+        await Wait(d => Said(d, "BTW · other\n\ndecline") && Said(d, "BTW · default\n\ndecline"));
+        Assert(Started("a-first") && Started("b-first") && !Started("a-second") && !Started("b-second"));
+        Send("/remove " + bNext);
+        Send("/clear"); // Only a-second is removed.
+        await Wait(d => d.Offset == nextId + 1 && !d.Jobs.Any(j => j.Id == aNext));
+        Assert((await journal.SnapshotAsync(default)).Jobs.Any(j => j.Id == bNext));
+        Send("/cancel"); // Only a-first is cancelled.
+        await Wait(d => d.Outcomes.Any(o => o.Id == a && o.Status == "Cancelled or timed out"));
+        Assert((await journal.SnapshotAsync(default)).Jobs.Any(j => j.Id == b && j.Running));
+        Assert(!Started("b-second"));
+        File.WriteAllText(Path.Combine(fixture.Root, "release-b-first"), "");
+        await Wait(d => Started("b-second"));
+        File.WriteAllText(Path.Combine(fixture.Root, "release-b-second"), "");
+        await Wait(d => d.Jobs.Count == 0);
+        Assert(!Started("a-second"));
+        Assert((await journal.SnapshotAsync(default)).Outcomes.Count(o => o.Status == "Completed") == 2);
+    }
+    finally { await worker.StopAsync(default); }
+}
+
+static async Task ConversationRecovery()
+{
+    using var fixture = new Fixture();
+    var journal = new Journal(fixture.Options);
+    await journal.InitializeAsync(default);
+    await journal.ChangeAsync(d => {
+        d.Approvals = true; // Existing installations inherit the legacy choice.
+        d.Conversations.Add("other");
+        d.ConversationApprovals["other"] = false;
+        d.Jobs.Add(new Job(1, 123, "a-running", Running: true));
+        d.Jobs.Add(new Job(2, 123, "a-next"));
+        d.Jobs.Add(new Job(3, 123, "b-running", Running: true, Conversation: "other"));
+        d.Jobs.Add(new Job(4, 123, "b-next", Conversation: "other"));
+    }, default);
+    var restarted = new Journal(fixture.Options);
+    await restarted.InitializeAsync(default);
+    var state = await restarted.SnapshotAsync(default);
+    Assert(state.Jobs.Select(j => j.Id).SequenceEqual(new long[] { 2, 4 }));
+    Assert(state.Jobs[0].ApprovalRequired && !state.Jobs[1].ApprovalRequired);
+    Assert(state.Outcomes.Count == 2 && state.Outcomes.All(o => o.Status == "Interrupted by restart"));
+    Assert(state.ApprovalFor("default", false) && !state.ApprovalFor("other", false));
+    for (var i = 0; i < 19; i++) state.Jobs.Add(new Job(10 + i, 123, "full"));
+    var now = DateTimeOffset.UtcNow;
+    state.Schedules.Add(new Schedule("a", 123, "scheduled", "default", "every 1m", now));
+    state.Schedules.Add(new Schedule("b", 123, "scheduled", "other", "every 1m", now));
+    Scheduling.EnqueueDue(state, now, false);
+    Assert(!state.Jobs.Any(j => j.ScheduleId == "a") && state.Jobs.Single(j => j.ScheduleId == "b").ApprovalRequired == false);
+}
+
+static async Task ConversationFailure()
+{
+    using var fixture = new Fixture();
+    var journal = new Journal(fixture.Options);
+    await journal.InitializeAsync(default);
+    await journal.ChangeAsync(d => d.Conversations.Add("other"), default);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var stopped = false;
+    async Task Consume(string name, CancellationToken token)
+    {
+        if (name == "default")
+        {
+            await started.Task.WaitAsync(token);
+            throw new FatalRunnerException("test failure", new IOException());
+        }
+        started.SetResult();
+        try { await Task.Delay(Timeout.Infinite, token); }
+        finally { stopped = true; }
+    }
+    await Throws<FatalRunnerException>(() => ConversationWorkers.RunAsync(journal, Consume, default).WaitAsync(TimeSpan.FromSeconds(5)));
+    Assert(stopped, "Sibling was not drained on failure");
+}
+
 static async Task SideQuestions()
 {
     using var fixture = new Fixture();
@@ -305,6 +439,9 @@ static async Task CatalogueMenus()
     var choice = state.Replies.Last().Buttons![1][0].Data["choice:".Length..];
     Assert(menus.Select(state, 999, choice).StartsWith("Menu expired"));
     state.ActiveConversation = "other";
+    Assert(menus.Select(state, 123, choice).StartsWith("Menu expired"));
+    Assert(ModelSettings.For(state, "default") == new ModelSettings(null, "high"));
+    state.ActiveConversation = "default";
     menus.Select(state, 123, choice);
     Assert(ModelSettings.For(state, "default") == new ModelSettings("model-one"));
     Assert(ModelSettings.For(state, "other") == new ModelSettings());
@@ -787,12 +924,19 @@ static async Task ConversationsAndQueue()
     BotCommands.Apply(data, 123, "/conversation homelab", false);
     Assert(data.ActiveConversation == "homelab" && data.Jobs.All(j => j.Conversation == "default"));
     BotCommands.Apply(data, 123, "/front 3", false);
-    Assert(data.Jobs.Select(j => j.Id).SequenceEqual(new long[] { 1, 3, 2 }));
+    BotCommands.Apply(data, 123, "/remove 2", false);
+    BotCommands.Apply(data, 123, "/clear", false);
+    Assert(data.Jobs.Select(j => j.Id).SequenceEqual(new long[] { 1, 2, 3 }), "Another conversation's queue changed");
+    BotCommands.Apply(data, 123, "/approvals on", false);
+    Assert(data.Jobs.All(j => !j.ApprovalRequired));
+    BotCommands.Apply(data, 123, "/conversation default", false);
+    BotCommands.Apply(data, 123, "/front 3", false);
+    Assert(data.Jobs.Select(j => j.Id).SequenceEqual(new long[] { 3, 1, 2 }));
     BotCommands.Apply(data, 123, "/remove 1", false);
     Assert(data.Jobs.Count == 3, "Removed running work");
     BotCommands.Apply(data, 123, "/approvals on", false);
     BotCommands.Apply(data, 123, "/approvals off", false);
-    Assert(data.Jobs.Skip(1).All(j => j.ApprovalRequired), "Queued approval policy weakened");
+    Assert(data.Jobs.Where(j => !j.Running).All(j => j.ApprovalRequired), "Queued approval policy weakened");
     BotCommands.Apply(data, 123, "/clear", false);
     Assert(data.Jobs.Count == 1 && data.Jobs[0].Running);
     var legacy = JsonSerializer.Deserialize<JournalData>("{\"Offset\":4,\"Jobs\":[{\"Id\":4,\"ChatId\":123,\"Text\":\"hello\"}],\"Replies\":[]}")!;
@@ -815,6 +959,9 @@ static Task Schedules()
     Assert(data.Schedules[0].NextRun == now.AddMinutes(30));
     Scheduling.EnqueueDue(data, now.AddHours(2), false);
     Assert(data.Jobs.Count == 1, "Schedule overlapped itself");
+    BotCommands.Apply(data, 123, "/schedule pause s", false);
+    Assert(data.Jobs.Count == 1 && !data.Schedules[0].Paused, "Another conversation's schedule changed");
+    data.ActiveConversation = "homelab";
     BotCommands.Apply(data, 123, "/schedule pause s", false);
     Assert(data.Jobs.Count == 0 && data.Schedules[0].Paused);
     var roundtrip = JsonSerializer.Deserialize<JournalData>(JsonSerializer.Serialize(data))!;

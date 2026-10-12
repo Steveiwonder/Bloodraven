@@ -2,11 +2,13 @@ namespace Bloodraven;
 
 public static class BotCommands
 {
-    public const string Help = "Bloodraven\n/conversation name — create or switch conversation\n/conversations — list conversations\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks\n/btw question — ask a side question while work continues\n/cancel — stop only the running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
+    public const string Help = "Bloodraven — task commands apply to the selected conversation.\n/conversation name — create or switch conversation\n/conversations — list conversations\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks in this conversation\n/btw question — ask a side question while work continues\n/cancel — stop this conversation’s running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
 
     public static bool Apply(JournalData data, long chat, string text, bool defaultApproval)
     {
         var command = BotWorker.Command(text);
+        var conversation = data.ActiveConversation;
+        var jobs = data.Jobs.Where(j => j.Conversation == conversation).ToArray();
         var argument = text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1)?.Trim() ?? "";
         void Reply(string value, InlineButton[][]? buttons = null) => data.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chat, value, Buttons: buttons));
         switch (command)
@@ -46,29 +48,29 @@ public static class BotCommands
                 data.ActiveConversation = argument;
                 Reply($"Active conversation: {argument}. Existing queued tasks keep their original conversation."); return true;
             case "/conversations":
-                Reply("Conversations (tap to switch):\n" + string.Join('\n', data.Conversations.Select(n => (n == data.ActiveConversation ? "• " : "  ") + n)),
+                Reply("Conversations (tap to switch):\n" + string.Join('\n', data.Conversations.Select(n => (n == data.ActiveConversation ? "• " : "  ") + n + $" · {(data.Jobs.Any(j => j.Conversation == n && j.Running) ? "working" : "idle")} · {data.Jobs.Count(j => j.Conversation == n && !j.Running)} waiting")),
                     data.Conversations.Select(n => new[] { new InlineButton(n, "conv:" + n) }).ToArray()); return true;
             case "/queue":
-                Reply(data.Jobs.Count == 0 ? "The queue is empty." : string.Join('\n', data.Jobs.Select(j => $"{j.Id}: {j.Conversation} · {(j.Running ? "running" : "waiting")} · {Preview(j.Text)}")),
-                    data.Jobs.Where(j => !j.Running).Select(j => new[] { new InlineButton($"{j.Id} → next", "front:" + j.Id), new InlineButton($"Remove {j.Id}", "remove:" + j.Id) }).ToArray()); return true;
+                Reply(jobs.Length == 0 ? $"The queue for {conversation} is empty." : string.Join('\n', jobs.Select(j => $"{j.Id}: {j.Conversation} · {(j.Running ? "running" : "waiting")} · {Preview(j.Text)}")),
+                    jobs.Where(j => !j.Running).Select(j => new[] { new InlineButton($"{j.Id} → next", "front:" + j.Id), new InlineButton($"Remove {j.Id}", "remove:" + j.Id) }).ToArray()); return true;
             case "/remove": case "/front":
                 if (!long.TryParse(argument, out var id)) { Reply("Invalid task ID."); return true; }
-                var job = data.Jobs.FirstOrDefault(j => j.Id == id && !j.Running);
-                if (job is null) { Reply("That task is already running or no longer queued."); return true; }
+                var job = data.Jobs.FirstOrDefault(j => j.Id == id && j.Conversation == conversation && !j.Running);
+                if (job is null) { Reply("That task is not pending in the selected conversation."); return true; }
                 data.Jobs.Remove(job);
-                if (command == "/front") data.Jobs.Insert(data.Jobs.FindLastIndex(j => j.Running) + 1, job);
+                if (command == "/front") data.Jobs.Insert(0, job);
                 Reply(command == "/front" ? $"Task {id} moved to next." : $"Task {id} removed."); return true;
             case "/clear":
-                var removed = data.Jobs.RemoveAll(j => !j.Running);
+                var removed = data.Jobs.RemoveAll(j => !j.Running && j.Conversation == conversation);
                 Reply($"Removed {removed} pending task(s). The current task continues; schedules remain enabled."); return true;
             case "/approvals":
                 if (argument is not ("on" or "off"))
-                { Reply($"Approvals: {((data.Approvals ?? defaultApproval) ? "on" : "off")}. Use /approvals on or /approvals off."); return true; }
-                data.Approvals = argument == "on";
-                if (data.Approvals == true)
+                { Reply($"Approvals: {((data.ApprovalFor(conversation, defaultApproval)) ? "on" : "off")}. Use /approvals on or /approvals off."); return true; }
+                data.ConversationApprovals[conversation] = argument == "on";
+                if (argument == "on")
                     for (var i = 0; i < data.Jobs.Count; i++)
-                        if (!data.Jobs[i].Running) data.Jobs[i] = data.Jobs[i] with { ApprovalRequired = true };
-                Reply($"Approvals {argument}. Running work keeps its current policy. Disabling applies only to newly queued tasks. Approval mode uses a separate conversation history and a read-only Codex sandbox."); return true;
+                        if (!data.Jobs[i].Running && data.Jobs[i].Conversation == conversation) data.Jobs[i] = data.Jobs[i] with { ApprovalRequired = true };
+                Reply($"Approvals {argument} for {conversation}. Running work keeps its current policy. Disabling applies only to newly queued tasks. Approval mode uses a separate conversation history and a read-only Codex sandbox."); return true;
             case "/schedule":
                 try { ScheduleCommand(data, chat, argument, Reply); }
                 catch (ArgumentException ex) { Reply(ex.Message); }
@@ -80,6 +82,7 @@ public static class BotCommands
     static string Preview(string text) => text.Replace('\n', ' ').Replace('\r', ' ') is var one && one.Length > 70 ? one[..70] + "…" : one;
     static void ScheduleCommand(JournalData data, long chat, string argument, Action<string, InlineButton[][]?> reply)
     {
+        var schedules = data.Schedules.Where(s => s.Conversation == data.ActiveConversation).ToArray();
         var parts = argument.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
         var action = parts.FirstOrDefault() ?? "help";
         if (action == "add")
@@ -95,11 +98,11 @@ public static class BotCommands
             reply($"Schedule {id} added for {data.ActiveConversation}. Next: {next:yyyy-MM-dd HH:mm} UTC.", null);
         }
         else if (action == "list")
-            reply(data.Schedules.Count == 0 ? "No schedules." : string.Join("\n\n", data.Schedules.Select(s => $"{s.Id} · {s.Conversation}\n{s.Timing} · {(s.Paused ? "paused" : $"next {s.NextRun:yyyy-MM-dd HH:mm} UTC")}\n{Preview(s.Prompt)}")),
-                data.Schedules.Select(s => new[] { new InlineButton(s.Paused ? "Resume " + s.Id : "Pause " + s.Id, (s.Paused ? "schedresume:" : "schedpause:") + s.Id), new InlineButton("Delete", "scheddelete:" + s.Id) }).ToArray());
+            reply(schedules.Length == 0 ? "No schedules." : string.Join("\n\n", schedules.Select(s => $"{s.Id} · {s.Conversation}\n{s.Timing} · {(s.Paused ? "paused" : $"next {s.NextRun:yyyy-MM-dd HH:mm} UTC")}\n{Preview(s.Prompt)}")),
+                schedules.Select(s => new[] { new InlineButton(s.Paused ? "Resume " + s.Id : "Pause " + s.Id, (s.Paused ? "schedresume:" : "schedpause:") + s.Id), new InlineButton("Delete", "scheddelete:" + s.Id) }).ToArray());
         else if (action is "pause" or "resume" or "delete")
         {
-            var index = data.Schedules.FindIndex(s => s.Id == parts.ElementAtOrDefault(1));
+            var index = data.Schedules.FindIndex(s => s.Id == parts.ElementAtOrDefault(1) && s.Conversation == data.ActiveConversation);
             if (index < 0) throw new ArgumentException("Schedule not found. Use /schedule list.");
             var schedule = data.Schedules[index];
             if (action == "delete") data.Schedules.RemoveAt(index);

@@ -41,14 +41,14 @@ public static class Scheduling
 
     public static void EnqueueDue(JournalData data, DateTimeOffset now, bool defaultApproval)
     {
-        for (var i = 0; i < data.Schedules.Count && data.Jobs.Count < 20; i++)
+        for (var i = 0; i < data.Schedules.Count; i++)
         {
             var schedule = data.Schedules[i];
-            if (schedule.Paused || schedule.NextRun > now) continue;
+            if (schedule.Paused || schedule.NextRun > now || data.Jobs.Count(j => j.Conversation == schedule.Conversation) >= 20) continue;
             if (!data.Jobs.Any(j => j.ScheduleId == schedule.Id))
                 data.Jobs.Add(new Job(data.NextScheduledId--, schedule.ChatId, schedule.Prompt,
                     Conversation: schedule.Conversation, ScheduleId: schedule.Id,
-                    ApprovalRequired: data.Approvals ?? defaultApproval, Settings: ModelSettings.For(data, schedule.Conversation)));
+                    ApprovalRequired: data.ApprovalFor(schedule.Conversation, defaultApproval), Settings: ModelSettings.For(data, schedule.Conversation)));
             data.Schedules[i] = schedule with { NextRun = Next(schedule.Timing, now) };
         }
     }

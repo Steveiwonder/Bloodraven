@@ -25,7 +25,10 @@ public sealed class JournalData
     public List<Schedule> Schedules { get; set; } = [];
     public List<TaskOutcome> Outcomes { get; set; } = [];
     public List<TimingReport> Timings { get; set; } = [];
-    public bool? Approvals { get; set; }
+    public bool? Approvals { get; set; } // Legacy default retained for existing installations.
+    public Dictionary<string, bool> ConversationApprovals { get; set; } = [];
+    public bool ApprovalFor(string conversation, bool fallback) =>
+        ConversationApprovals.TryGetValue(conversation, out var enabled) ? enabled : Approvals ?? fallback;
     public Dictionary<string, ModelSettings> ModelSettings { get; set; } = [];
     public long NextScheduledId { get; set; } = -1;
 }
@@ -47,9 +50,8 @@ public sealed class Journal(AppOptions options)
                 ?? throw new InvalidDataException("Invalid journal; restore it from backup instead of discarding work.");
         await ChangeAsync(d =>
         {
-            if (d.Approvals ?? options.ApprovalDefault)
-                for (var i = 0; i < d.Jobs.Count; i++)
-                    if (!d.Jobs[i].Running) d.Jobs[i] = d.Jobs[i] with { ApprovalRequired = true };
+            for (var i = 0; i < d.Jobs.Count; i++)
+                if (!d.Jobs[i].Running && d.ApprovalFor(d.Jobs[i].Conversation, options.ApprovalDefault)) d.Jobs[i] = d.Jobs[i] with { ApprovalRequired = true };
             d.Replies.RemoveAll(r => r.Buttons?.SelectMany(row => row).Any(b => b.Data.StartsWith("approve:", StringComparison.Ordinal)) == true);
             foreach (var job in d.Jobs.Where(j => j.Running).ToArray())
             {
@@ -93,6 +95,7 @@ public sealed class Journal(AppOptions options)
         Offset = value.Offset, Jobs = [.. value.Jobs], Replies = [.. value.Replies], SideQuestions = [.. value.SideQuestions],
         ActiveConversation = value.ActiveConversation, Conversations = [.. value.Conversations],
         Schedules = [.. value.Schedules], Outcomes = [.. value.Outcomes], Timings = [.. value.Timings], Approvals = value.Approvals,
+        ConversationApprovals = new(value.ConversationApprovals),
         NextScheduledId = value.NextScheduledId, ModelSettings = new(value.ModelSettings)
     };
     public static void AddReply(JournalData data, long chatId, string text) =>
