@@ -6,8 +6,15 @@ readonly REPOSITORY_URL="https://github.com/Steveiwonder/Bloodraven.git"
 readonly CODEX_INSTALLER_URL="https://chatgpt.com/codex/install.sh"
 readonly INVOCATION_DIRECTORY="${PWD}"
 
-say() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
-fail() { printf '\nBloodraven setup failed: %s\n' "$*" >&2; exit 1; }
+say() {
+  printf '\n\033[1;36m%s\033[0m\n' "$*"
+}
+
+fail() {
+  printf '\nBloodraven setup failed: %s\n' "$*" >&2
+  exit 1
+}
+
 cleanup() {
   rm -f -- "${dotnet_installer:-}"
   rm -f -- "${codex_installer:-}"
@@ -15,6 +22,7 @@ cleanup() {
     rm -rf -- "${checkout_directory}"
   fi
 }
+
 trap cleanup EXIT
 
 if [[ "${EUID}" -eq 0 ]]; then
@@ -24,6 +32,7 @@ fi
 if [[ ! -r /etc/os-release ]]; then
   fail "This first release supports Ubuntu only."
 fi
+
 # shellcheck disable=SC1091
 source /etc/os-release
 if [[ "${ID:-}" != "ubuntu" ]]; then
@@ -62,6 +71,7 @@ if ! command -v codex >/dev/null 2>&1; then
   sh "${codex_installer}"
   export PATH="${HOME}/.local/bin:${HOME}/.codex/bin:${PATH}"
 fi
+
 command -v codex >/dev/null 2>&1 || fail "Codex installed but was not found in PATH. Start a new terminal and run this command again."
 
 if ! codex login status >/dev/null 2>&1; then
@@ -69,6 +79,7 @@ if ! codex login status >/dev/null 2>&1; then
   echo "Follow the Codex sign-in instructions below. Bloodraven will wait for you to finish."
   codex login
 fi
+
 codex login status >/dev/null 2>&1 || fail "Codex sign-in was not completed."
 
 say "Downloading Bloodraven"
