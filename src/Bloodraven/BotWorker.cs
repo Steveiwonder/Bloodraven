@@ -182,7 +182,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     try { sideSession = await sessions.GetAsync(token, state.ActiveConversation, state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault)); }
                     catch (InvalidDataException) { error = "Cannot read this conversation's session. The main task has not been changed."; }
                 }
-                await journal.ChangeAsync(d =>
+                await journal.ChangeWithAsync(async d =>
                 {
                     d.Offset = update.UpdateId + 1;
                     if (!allowed) return;
@@ -220,6 +220,11 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                         if (report is not null && timings.TryGetValue(report.Id, out var live)) report = live.Snapshot();
                         if (report?.Status == "Queued" && !d.Jobs.Any(j => j.Id == report.Id)) report = report with { Status = "Removed from queue" };
                         Journal.AddReply(d, chat, report is null ? "No timing report yet. Send a prompt first; timings start with this version." : TaskTimings.Format(report));
+                        return;
+                    }
+                    if (command == "/delete")
+                    {
+                        await BotCommands.DeleteAsync(d, chat, text, sessions, token);
                         return;
                     }
                     if (BotCommands.Apply(d, chat, text, options.ApprovalDefault)) return;

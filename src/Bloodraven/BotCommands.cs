@@ -2,7 +2,7 @@ namespace Bloodraven;
 
 public static class BotCommands
 {
-    public const string Help = "Bloodraven — task commands apply to the selected conversation.\n/conversation name — create or switch conversation\n/conversations — list conversations\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks in this conversation\n/btw question — ask a side question while work continues\n/cancel — stop this conversation’s running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
+    public const string Help = "Bloodraven — task commands apply to the selected conversation.\n/conversation name — create or switch conversation\n/conversations — list conversations\n/delete name — delete an idle conversation\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks in this conversation\n/btw question — ask a side question while work continues\n/cancel — stop this conversation’s running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
 
     public static bool Apply(JournalData data, long chat, string text, bool defaultApproval)
     {
@@ -77,6 +77,35 @@ public static class BotCommands
                 return true;
             default: return false;
         }
+    }
+
+    // Called while the journal lock is held, so consumers cannot start work
+    // between the running check, session unlinking and queue removal.
+    public static async Task DeleteAsync(JournalData data, long chat, string text,
+        SessionStore sessions, CancellationToken token)
+    {
+        var name = text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1)?.Trim() ?? "";
+        void Reply(string message) => Journal.AddReply(data, chat, message);
+        if (!SessionStore.ValidName(name)) { Reply("Use /delete name."); return; }
+        if (name == "default") { Reply("The default conversation cannot be deleted. Select it and use /new to reset its history."); return; }
+        if (!data.Conversations.Contains(name)) { Reply($"Conversation {name} not found."); return; }
+        if (data.Jobs.Any(j => j.Conversation == name && j.Running) ||
+            data.SideQuestions.Any(q => q.Conversation == name && q.Running))
+        {
+            Reply($"Conversation {name} is busy. Wait for its task and BTW answer to finish, or select it and use /cancel for its main task, then retry /delete {name}.");
+            return;
+        }
+        await sessions.ClearAsync(token, name);
+        data.Jobs.RemoveAll(j => j.Conversation == name);
+        data.SideQuestions.RemoveAll(q => q.Conversation == name);
+        data.Schedules.RemoveAll(s => s.Conversation == name);
+        data.Outcomes.RemoveAll(o => o.Conversation == name);
+        data.Timings.RemoveAll(t => t.Conversation == name);
+        data.ModelSettings.Remove(name);
+        data.ConversationApprovals.Remove(name);
+        data.Conversations.Remove(name);
+        if (data.ActiveConversation == name) data.ActiveConversation = "default";
+        Reply($"Deleted conversation {name}, its pending tasks, schedules and settings. Active conversation: {data.ActiveConversation}. Codex transcript files and repository files are retained.");
     }
 
     static string Preview(string text) => text.Replace('\n', ' ').Replace('\r', ' ') is var one && one.Length > 70 ? one[..70] + "…" : one;
