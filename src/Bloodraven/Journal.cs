@@ -4,7 +4,7 @@ namespace Bloodraven;
 
 public sealed record Attachment(string FileId, string Name, bool Image, long Size = 0);
 
-public sealed record Job(long Id, long ChatId, string Text, bool Running = false, string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null, long? ProgressMessageId = null, bool ApprovalRequired = false, ModelSettings? Settings = null);
+public sealed record Job(long Id, long ChatId, string Text, bool Running = false, string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null, long? ProgressMessageId = null, bool ApprovalRequired = false, ModelSettings? Settings = null, string? Sandbox = null);
 
 public sealed record SideQuestion(long Id, long ChatId, string Question, string Conversation, string SessionId, ModelSettings Settings, bool Running = false);
 
@@ -32,6 +32,10 @@ public sealed class JournalData
     {
         get; set;
     } // Legacy default retained for existing installations.
+    public Dictionary<string, string> ConversationSandboxes { get; set; } = [];
+
+    public string SandboxFor(string conversation, string fallback) => ConversationSandboxes.GetValueOrDefault(conversation) ?? fallback;
+
     public Dictionary<string, bool> ConversationApprovals { get; set; } = [];
 
     public bool ApprovalFor(string conversation, bool fallback) => ConversationApprovals.TryGetValue(conversation, out var enabled) ? enabled : Approvals ?? fallback;
@@ -62,7 +66,7 @@ public sealed class Journal(AppOptions options)
         {
             for (var i = 0; i < d.Jobs.Count; i++)
             {
-                if (!d.Jobs[i].Running && d.ApprovalFor(d.Jobs[i].Conversation, options.ApprovalDefault))
+                if (!d.Jobs[i].Running && d.Jobs[i].Sandbox is null && d.ApprovalFor(d.Jobs[i].Conversation, options.ApprovalDefault))
                 {
                     d.Jobs[i] = d.Jobs[i] with
                     {
@@ -161,6 +165,7 @@ public sealed class Journal(AppOptions options)
         Timings = [.. value.Timings],
         Approvals = value.Approvals,
         ConversationApprovals = new(value.ConversationApprovals),
+        ConversationSandboxes = new(value.ConversationSandboxes),
         NextScheduledId = value.NextScheduledId,
         ModelSettings = new(value.ModelSettings)
     };

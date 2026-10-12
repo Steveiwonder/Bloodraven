@@ -35,8 +35,13 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         }
     }
 
-    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null, string conversation = "default", IReadOnlyList<string>? images = null, Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null, ModelSettings? settings = null, TaskTimings? timing = null)
+    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null, string conversation = "default", IReadOnlyList<string>? images = null, Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null, ModelSettings? settings = null, TaskTimings? timing = null, string? sandbox = null)
     {
+        if (sandbox is not null && !PermissionMenus.ValidSandbox(sandbox))
+        {
+            throw new InvalidDataException("Invalid saved permission mode.");
+        }
+
         using var run = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
         run.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
@@ -78,6 +83,8 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
 
             options.RemoveBridgeSecrets(start);
             (settings ?? new()).AddArguments(start);
+            start.ArgumentList.Add("--ask-for-approval");
+            start.ArgumentList.Add("never");
 
             foreach (var arg in new[]
             {
@@ -86,7 +93,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 "exec",
                 "--json",
                 "--sandbox",
-                options.Sandbox
+                sandbox ?? options.Sandbox
             })
             {
                 start.ArgumentList.Add(arg);

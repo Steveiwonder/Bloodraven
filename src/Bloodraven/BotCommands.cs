@@ -2,7 +2,7 @@ namespace Bloodraven;
 
 public static class BotCommands
 {
-    public const string Help = "Bloodraven — task commands apply to the selected conversation.\n/conversation name — create or switch conversation\n/conversations — list conversations\n/delete name — delete an idle conversation\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks in this conversation\n/btw question — ask a side question while work continues\n/cancel — stop this conversation’s running task\n/schedule — recurring task help\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
+    public const string Help = "Bloodraven — task commands apply to the selected conversation.\n/conversation name — create or switch conversation\n/conversations — list conversations\n/delete name — delete an idle conversation\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks in this conversation\n/btw question — ask a side question while work continues\n/cancel — stop this conversation’s running task\n/schedule — recurring task help\n/permissions — choose permissions for this conversation\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
 
     public static bool Apply(JournalData data, long chat, string text, bool defaultApproval)
     {
@@ -215,6 +215,7 @@ public static class BotCommands
         data.Timings.RemoveAll(t => t.Conversation == name);
         data.ModelSettings.Remove(name);
         data.ConversationApprovals.Remove(name);
+        data.ConversationSandboxes.Remove(name);
         data.Conversations.Remove(name);
         if (data.ActiveConversation == name)
         {
