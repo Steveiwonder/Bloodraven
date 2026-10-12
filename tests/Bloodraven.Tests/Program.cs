@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("permissions persist, bind menus and reach new/resumed runners", Permissions),
     ("delete removes only idle named conversation state and session links", DeleteConversation),
     ("conversation workers run concurrently and commands stay scoped", ConcurrentConversations),
     ("conversation approval policies and queues survive restart", ConversationRecovery),
@@ -705,6 +706,68 @@ static async Task ModelPreferences()
     var legacy = JsonSerializer.Deserialize<JournalData>("{\"Jobs\":[{\"Id\":1,\"ChatId\":123,\"Text\":\"test\"}]}")!;
 
     Assert(legacy.ModelSettings.Count == 0 && legacy.Jobs.Single().Settings is null);
+}
+
+static async Task Permissions()
+{
+    using var fixture = new Fixture();
+    var journal = new Journal(fixture.Options);
+    var menus = new PermissionMenus();
+
+    await journal.InitializeAsync(default);
+    await journal.ChangeAsync(d =>
+    {
+        d.Conversations.Add("other");
+        d.Jobs.Add(new Job(11, 123, "running", Running: true, Sandbox: "read-only"));
+        d.Jobs.Add(new Job(12, 123, "queued", Sandbox: "read-only"));
+        menus.Apply(d, 123, "full", fixture.Options);
+        Assert(d.ConversationSandboxes["default"] == "danger-full-access");
+        Assert(!d.ApprovalFor("default", true));
+        Assert(d.Jobs.All(j => j.Sandbox == "read-only"));
+        menus.Show(d, 123, fixture.Options);
+        var button = d.Replies.Last().Buttons![0][0].Data[5..];
+
+        Assert(menus.Select(d, 999, button, fixture.Options).Contains("expired"));
+        d.ActiveConversation = "other";
+        Assert(menus.Select(d, 123, button, fixture.Options).Contains("expired"));
+        Assert(!d.ConversationSandboxes.ContainsKey("other"));
+        d.ActiveConversation = "default";
+        Assert(menus.Select(d, 123, button, fixture.Options).Contains("saved"));
+        Assert(d.ConversationSandboxes["default"] == "read-only");
+        Assert(menus.Select(d, 123, button, fixture.Options).Contains("expired"));
+        menus.Apply(d, 123, "invalid", fixture.Options);
+        Assert(d.ConversationSandboxes["default"] == "read-only");
+        menus.Apply(d, 123, "approvals", fixture.Options);
+        Assert(d.ApprovalFor("default", false));
+        d.Schedules.Add(new Schedule("p", 123, "test", "default", "every 30m", DateTimeOffset.UtcNow.AddMinutes(-1)));
+        Scheduling.EnqueueDue(d, DateTimeOffset.UtcNow, false, fixture.Options.Sandbox);
+        Assert(d.Jobs.Last().ApprovalRequired && d.Jobs.Last().Sandbox == "read-only");
+    }, default);
+
+    var restarted = new Journal(fixture.Options);
+
+    await restarted.InitializeAsync(default);
+    var state = await restarted.SnapshotAsync(default);
+
+    Assert(state.ConversationSandboxes["default"] == "read-only");
+    Assert(!state.Jobs.Single(j => j.Id == 12).ApprovalRequired);
+    state.ConversationSandboxes["default"] = "workspace-write";
+    Assert((await restarted.SnapshotAsync(default)).ConversationSandboxes["default"] == "read-only");
+    menus.Apply(state, 123, "default", fixture.Options);
+    Assert(!state.ConversationSandboxes.ContainsKey("default") && !state.ConversationApprovals.ContainsKey("default"));
+
+    var runner = new CodexRunner(fixture.Options, new SessionStore(fixture.Options));
+
+    foreach (var sandbox in new[] { "read-only", "workspace-write", "danger-full-access" })
+    {
+        using var output = JsonDocument.Parse(await runner.RunAsync("inspect", default, sandbox: sandbox));
+        var arguments = output.RootElement.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+
+        Assert(arguments[Array.IndexOf(arguments, "--sandbox") + 1] == sandbox);
+        Assert(arguments[Array.IndexOf(arguments, "--ask-for-approval") + 1] == "never");
+    }
+
+    await Throws<InvalidDataException>(() => runner.RunAsync("inspect", default, sandbox: "invalid"));
 }
 
 static async Task ModelRunners()
