@@ -9,7 +9,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     readonly object taskGate = new();
     readonly ModelMenus modelMenus = new();
     readonly System.Collections.Concurrent.ConcurrentDictionary<long, TaskTimings> timings = new();
-    CancellationTokenSource? activeTask;
+    readonly Dictionary<string, CancellationTokenSource> activeTasks = new();
     DateTimeOffset nextSend;
     DateTimeOffset? lastPoll;
     public static string Version => typeof(BotWorker).Assembly.GetName().Version?.ToString(3) ?? "unknown";
@@ -94,7 +94,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         }
         attachments.CleanupStale(await journal.SnapshotAsync(stoppingToken));
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        Task[] tasks = [PollAsync(lifetime.Token), ConsumeAsync(lifetime.Token), DeliverAsync(lifetime.Token), ScheduleAsync(lifetime.Token), AnswerSideQuestionsAsync(lifetime.Token)];
+        Task[] tasks = [PollAsync(lifetime.Token), ConversationWorkers.RunAsync(journal, ConsumeAsync, lifetime.Token), DeliverAsync(lifetime.Token), ScheduleAsync(lifetime.Token), ConversationWorkers.RunAsync(journal, AnswerSideQuestionsAsync, lifetime.Token)];
         try { await Task.WhenAny(tasks); lifetime.Cancel(); await Task.WhenAll(tasks); }
         finally { lifetime.Cancel(); File.Delete(Path.Combine(options.StateDirectory, "ready")); }
     }
@@ -102,10 +102,10 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     async Task<string> StatusAsync(JournalData state, bool health, CancellationToken token)
     {
         string? session;
-        try { session = await sessions.GetAsync(token, state.ActiveConversation, state.Approvals ?? options.ApprovalDefault); }
+        try { session = await sessions.GetAsync(token, state.ActiveConversation, state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault)); }
         catch (InvalidDataException) { session = "invalid — use /new"; }
-        var running = state.Jobs.FirstOrDefault(j => j.Running);
-        var text = $"Bloodraven {Version}\nStatus: {(codex.IsRunning ? "working" : "idle")}\nConversation: {state.ActiveConversation}\n{ModelSettings.For(state, state.ActiveConversation).Describe()}\nSession: {session ?? "none"}\nRunning: {(running is null ? "none" : $"{running.Id} ({running.Conversation})")}\nWaiting: {state.Jobs.Count(j => !j.Running)}\nPending replies: {state.Replies.Count}\nApproval requests: {approvals.Count}";
+        var running = state.Jobs.FirstOrDefault(j => j.Running && j.Conversation == state.ActiveConversation);
+        var text = $"Bloodraven {Version}\nStatus: {(running is not null ? "working" : "idle")}\nConversation: {state.ActiveConversation}\n{ModelSettings.For(state, state.ActiveConversation).Describe()}\nSession: {session ?? "none"}\nRunning: {(running is null ? "none" : $"{running.Id} ({running.Conversation})")}\nWaiting: {state.Jobs.Count(j => !j.Running && j.Conversation == state.ActiveConversation)}\nPending replies (all conversations): {state.Replies.Count}\nApproval requests: {approvals.CountFor(state.ActiveConversation)}";
         if (health)
         {
             string availability;
@@ -115,8 +115,8 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             catch (OperationCanceledException) when (!token.IsCancellationRequested) { availability = "health check timed out after 5 seconds"; }
             catch (OperationCanceledException) { throw; }
             catch (Exception) { availability = "check failed; inspect the local Codex login and repository permissions"; }
-            text += $"\nRepository: {options.WorkingDirectory}\nCodex: {availability}\nLast successful poll: {lastPoll:O}\nApprovals: {((state.Approvals ?? options.ApprovalDefault) ? "on" : "off")}\nSchedules: {state.Schedules.Count(s => !s.Paused)} enabled\nRecent failures:";
-            var failures = state.Outcomes.Where(o => o.Status != "Completed").TakeLast(5).ToArray();
+            text += $"\nRepository: {options.WorkingDirectory}\nCodex: {availability}\nLast successful poll: {lastPoll:O}\nApprovals: {((state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault)) ? "on" : "off")}\nSchedules: {state.Schedules.Count(s => !s.Paused && s.Conversation == state.ActiveConversation)} enabled\nRecent failures:";
+            var failures = state.Outcomes.Where(o => o.Status != "Completed" && o.Conversation == state.ActiveConversation).TakeLast(5).ToArray();
             text += failures.Length == 0 ? " none" : "\n" + string.Join('\n', failures.Select(o => $"{o.Finished:yyyy-MM-dd HH:mm} UTC · {o.Conversation} · {o.Status}"));
         }
         return text;
@@ -179,7 +179,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 string? sideSession = null;
                 if (allowed && error is null && command == "/btw")
                 {
-                    try { sideSession = await sessions.GetAsync(token, state.ActiveConversation, state.Approvals ?? options.ApprovalDefault); }
+                    try { sideSession = await sessions.GetAsync(token, state.ActiveConversation, state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault)); }
                     catch (InvalidDataException) { error = "Cannot read this conversation's session. The main task has not been changed."; }
                 }
                 await journal.ChangeAsync(d =>
@@ -197,7 +197,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                             Journal.AddReply(d, chat, "Use /btw <question> (text only). The main task keeps running.");
                         else if (sideSession is null)
                             Journal.AddReply(d, chat, "No saved session yet for this conversation. Wait for the main task to start, then retry /btw.");
-                        else if (d.SideQuestions.Count != 0)
+                        else if (d.SideQuestions.Any(q => q.Conversation == d.ActiveConversation))
                             Journal.AddReply(d, chat, "A BTW question is already pending. Wait for its answer before sending another.");
                         else
                         {
@@ -215,7 +215,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                         long requested = 0;
                         if (arg.Length > 2 || (arg.Length == 2 && !long.TryParse(arg[1], out requested)))
                         { Journal.AddReply(d, chat, "Use /timings or /timings TASK_ID."); return; }
-                        var report = d.Timings.Where(t => t.ChatId == chat && (arg.Length == 2 ? t.Id == requested : t.Conversation == d.ActiveConversation))
+                        var report = d.Timings.Where(t => t.ChatId == chat && t.Conversation == d.ActiveConversation && (arg.Length != 2 || t.Id == requested))
                             .OrderByDescending(t => t.Received).FirstOrDefault();
                         if (report is not null && timings.TryGetValue(report.Id, out var live)) report = live.Snapshot();
                         if (report?.Status == "Queued" && !d.Jobs.Any(j => j.Id == report.Id)) report = report with { Status = "Removed from queue" };
@@ -225,16 +225,16 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     if (BotCommands.Apply(d, chat, text, options.ApprovalDefault)) return;
                     if (text.StartsWith('/') && command is not ("/new" or "/file"))
                     { Journal.AddReply(d, chat, "Unknown command. Use /help for Bloodraven commands, or send a normal message to Codex."); return; }
-                    if (d.Jobs.Count >= 20) Journal.AddReply(d, chat, "Queue full. Try again after current work finishes.");
+                    if (d.Jobs.Count(j => j.Conversation == d.ActiveConversation) >= 20) Journal.AddReply(d, chat, "Queue full. Try again after current work finishes.");
                     else
                     {
                         d.Jobs.Add(new Job(update.UpdateId, chat, text, Conversation: d.ActiveConversation,
-                            Attachments: files, ApprovalRequired: d.Approvals ?? options.ApprovalDefault,
+                            Attachments: files, ApprovalRequired: d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault),
                             Settings: ModelSettings.For(d, d.ActiveConversation)));
                         var selected = ModelSettings.For(d, d.ActiveConversation);
                         var report = new TimingReport(update.UpdateId, chat, d.ActiveConversation, receivedAt, message.Date,
                             selected.Model ?? "Codex default", selected.Effort ?? "Codex default",
-                            (d.Approvals ?? options.ApprovalDefault) ? "app-server" : "exec", "Queued",
+                            (d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault)) ? "app-server" : "exec", "Queued",
                             [new TimingPoint("Received", receivedAt, 0), new TimingPoint("Queued", DateTimeOffset.UtcNow, System.Diagnostics.Stopwatch.GetElapsedTime(receivedTick).TotalMilliseconds)], Version: Version);
                         timings[update.UpdateId] = new TaskTimings(report);
                         TaskTimings.Save(d, report);
@@ -244,9 +244,9 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 if (allowed && error is null && command == "/cancel")
                 {
                     bool cancelled;
-                    lock (taskGate) { cancelled = activeTask is not null; activeTask?.Cancel(); }
+                    lock (taskGate) { cancelled = activeTasks.TryGetValue(state.ActiveConversation, out var active); active?.Cancel(); }
                     await journal.ChangeAsync(d => Journal.AddReply(d, message!.Chat.Id,
-                        cancelled ? "Cancellation requested; queued tasks are unaffected." : "No task is running."), token);
+                        cancelled ? $"Cancellation requested for {state.ActiveConversation}; queued tasks are unaffected." : $"No task is running in {state.ActiveConversation}."), token);
                 }
                 state = await journal.SnapshotAsync(token);
                 if (state.Replies.Count >= 100) break;
@@ -278,9 +278,10 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             }
             if (parts[0] is "approve" or "decline")
             {
-                answer = approvals.Decide(parts[1], message!.Chat.Id, parts[0] == "approve")
-                    ? (parts[0] == "approve" ? "Approved once." : "Declined.") : "This approval has expired or was already answered.";
-                d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), message!.Chat.Id, answer, EditMessageId: message.MessageId));
+                var decided = approvals.Decide(parts[1], message!.Chat.Id, parts[0] == "approve", d.ActiveConversation);
+                answer = decided ? (parts[0] == "approve" ? "Approved once." : "Declined.")
+                    : "Select the request's conversation first; it may also have expired.";
+                if (decided) d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), message!.Chat.Id, answer, EditMessageId: message.MessageId));
                 return;
             }
             var command = parts[0] switch {
@@ -299,23 +300,23 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         {
             var state = await journal.SnapshotAsync(token);
             var now = DateTimeOffset.UtcNow;
-            if (state.Replies.Count < 100 && state.Jobs.Count < 20 && state.Schedules.Any(s => !s.Paused && s.NextRun <= now))
+            if (state.Replies.Count < 100 && state.Schedules.Any(s => !s.Paused && s.NextRun <= now))
                 await journal.ChangeAsync(d => Scheduling.EnqueueDue(d, now, options.ApprovalDefault), token);
             await Task.Delay(1000, token);
         }
     }
 
-    async Task ConsumeAsync(CancellationToken token)
+    async Task ConsumeAsync(string conversation, CancellationToken token)
     {
         while (!token.IsCancellationRequested)
         {
             var changed = journal.Changed;
             var state = await journal.SnapshotAsync(token);
-            if (!state.Jobs.Any(j => !j.Running) || state.Replies.Count >= 100) { await changed.WaitAsync(token); continue; }
+            if (!state.Jobs.Any(j => !j.Running && j.Conversation == conversation) || state.Replies.Count >= 100) { await changed.WaitAsync(token); continue; }
             Job? job = null;
             await journal.ChangeAsync(d =>
             {
-                var index = d.Jobs.FindIndex(j => !j.Running);
+                var index = d.Jobs.FindIndex(j => !j.Running && j.Conversation == conversation);
                 if (index < 0) return;
                 job = d.Jobs[index] with { Running = true };
                 if (timings.TryGetValue(job.Id, out var trace))
@@ -329,7 +330,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             if (job is null) continue;
             using var taskLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
             taskLifetime.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
-            lock (taskGate) activeTask = taskLifetime;
+            lock (taskGate) activeTasks.Add(conversation, taskLifetime);
             string result;
             string outcome = "Completed";
             string? document = null;
@@ -384,7 +385,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 outcome = "Failed";
                 result = $"Task {job.Id} failed. Check service logs, Codex login, repository permissions and attachments. Your conversation has been kept. Review changes before retrying.";
             }
-            finally { lock (taskGate) activeTask = null; }
+            finally { lock (taskGate) activeTasks.Remove(conversation); }
             logger.LogInformation("Task {Id} finished: {Outcome}, elapsedMs={ElapsedMs}.", job.Id, outcome, elapsed.ElapsedMilliseconds);
             if (outcome == "Failed" && job.Settings is { } selected && (selected.Model is not null || selected.Effort is not null))
                 result += $"\nSubmitted settings:\n{selected.Describe()}\nCheck that your Codex login and model support these choices; /model and /reasoning change settings for new tasks.";
@@ -400,7 +401,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 d.Outcomes.Add(new TaskOutcome(job.Id, job.Conversation, outcome, DateTimeOffset.UtcNow));
                 if (d.Outcomes.Count > 50) d.Outcomes.RemoveRange(0, d.Outcomes.Count - 50);
                 d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), job.ChatId,
-                    job.Conversation == "default" ? result : $"Conversation: {job.Conversation}\n\n{result}", DocumentPath: document,
+                    $"Conversation: {job.Conversation}\n\n{result}", DocumentPath: document,
                     TimingJobId: job.Id, TimingKind: "Final"));
                 // The cosmetic status edit must not consume the next send slot
                 // ahead of the answer (including all parts of a long answer).
@@ -411,16 +412,19 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         }
     }
 
-    async Task AnswerSideQuestionsAsync(CancellationToken token)
+    async Task AnswerSideQuestionsAsync(string conversation, CancellationToken token)
     {
         while (!token.IsCancellationRequested)
         {
             var changed = journal.Changed;
             var state = await journal.SnapshotAsync(token);
-            if (state.SideQuestions.Count == 0 || state.Replies.Count >= 100)
+            var question = state.SideQuestions.FirstOrDefault(q => q.Conversation == conversation);
+            if (question is null || state.Replies.Count >= 100)
             { await changed.WaitAsync(token); continue; }
-            var question = state.SideQuestions[0];
-            await journal.ChangeAsync(d => d.SideQuestions[0] = question with { Running = true }, token);
+            await journal.ChangeAsync(d => {
+                var index = d.SideQuestions.FindIndex(q => q.Id == question.Id);
+                d.SideQuestions[index] = question with { Running = true };
+            }, token);
             using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
             lifetime.CancelAfter(TimeSpan.FromSeconds(Math.Min(300, options.TaskTimeoutSeconds)));
             string answer;

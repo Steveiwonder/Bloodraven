@@ -35,7 +35,7 @@ public sealed class ModelMenus
     public string Select(JournalData data, long chat, string payload)
     {
         var parts = payload.Split(':');
-        if (parts.Length != 2 || !menus.TryGetValue(parts[0], out var menu) || menu.Chat != chat ||
+        if (parts.Length != 2 || !menus.TryGetValue(parts[0], out var menu) || menu.Chat != chat || menu.Conversation != data.ActiveConversation ||
             menu.Expires < DateTimeOffset.UtcNow || !int.TryParse(parts[1], out var index) || index < 0 || index >= menu.Values.Length ||
             ModelSettings.For(data, menu.Conversation) != menu.Original)
             return "Menu expired or settings changed. Open /model or /effort again.";

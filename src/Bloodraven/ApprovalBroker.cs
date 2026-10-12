@@ -6,17 +6,18 @@ namespace Bloodraven;
 public sealed class ApprovalBroker(Journal journal)
 {
     readonly ConcurrentDictionary<string, Pending> pending = new();
-    sealed record Pending(long ChatId, TaskCompletionSource<bool> Answer);
+    sealed record Pending(long ChatId, string Conversation, TaskCompletionSource<bool> Answer);
     public int Count => pending.Count;
+    public int CountFor(string conversation) => pending.Values.Count(p => p.Conversation == conversation);
 
-    public bool Decide(string nonce, long chatId, bool accept) =>
-        pending.TryGetValue(nonce, out var item) && item.ChatId == chatId && item.Answer.TrySetResult(accept);
+    public bool Decide(string nonce, long chatId, bool accept, string? conversation = null) =>
+        pending.TryGetValue(nonce, out var item) && item.ChatId == chatId && (conversation is null || item.Conversation == conversation) && item.Answer.TrySetResult(accept);
 
     public async Task<bool> RequestAsync(long chatId, string conversation, string method, JsonElement details, CancellationToken token)
     {
         var nonce = Guid.NewGuid().ToString("N");
         var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        pending[nonce] = new Pending(chatId, answer);
+        pending[nonce] = new Pending(chatId, conversation, answer);
         try
         {
             // Do not truncate the proposed command: approval must describe the complete operation.
@@ -30,7 +31,7 @@ public sealed class ApprovalBroker(Journal journal)
                 return false;
             }
             await journal.ChangeAsync(d => d.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chatId,
-                $"Approval required · {conversation}\n{method}\n\n{description}\n\nApprove this operation once? Expires in 5 minutes. /cancel stops the task.",
+                $"Approval required · {conversation}\n{method}\n\n{description}\n\nApprove this operation once? Expires in 5 minutes. Select this conversation before using /cancel.",
                 Buttons: [[new("Approve once", "approve:" + nonce), new("Decline", "decline:" + nonce)]], Plain: true)), token);
             try { return await answer.Task.WaitAsync(TimeSpan.FromMinutes(5), token); }
             catch (TimeoutException)

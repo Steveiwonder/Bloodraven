@@ -9,14 +9,14 @@ public sealed class FatalRunnerException(string message, Exception inner) : Exce
 public sealed class CodexRunner(AppOptions options, SessionStore sessions)
 {
     readonly object gate = new();
-    CancellationTokenSource? current;
-    public bool IsRunning { get { lock (gate) return current is not null; } }
-    public bool Cancel()
+    readonly Dictionary<string, CancellationTokenSource> current = new();
+    public bool IsRunning { get { lock (gate) return current.Count != 0; } }
+    public bool Cancel(string conversation = "default")
     {
         lock (gate)
         {
-            if (current is null) return false;
-            current.Cancel();
+            if (!current.TryGetValue(conversation, out var task)) return false;
+            task.Cancel();
             return true;
         }
     }
@@ -29,8 +29,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         run.CancelAfter(TimeSpan.FromSeconds(options.TaskTimeoutSeconds));
         lock (gate)
         {
-            if (current is not null) throw new InvalidOperationException("A Codex task is already running.");
-            current = run;
+            if (!current.TryAdd(conversation, run)) throw new InvalidOperationException("A Codex task is already running in this conversation.");
         }
         try
         {
@@ -167,7 +166,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 catch (Exception ex) { throw new FatalRunnerException("Unable to reap Codex; stopping the service to prevent overlapping tasks.", ex); }
             }
         }
-        finally { timing?.Mark("Runner stopped"); lock (gate) current = null; }
+        finally { timing?.Mark("Runner stopped"); lock (gate) current.Remove(conversation); }
     }
 }
 
