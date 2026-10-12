@@ -7,6 +7,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
     readonly AttachmentStore attachments = new(options, telegram);
     readonly object taskGate = new();
     readonly ModelMenus modelMenus = new();
+    readonly PermissionMenus permissionMenus = new();
     readonly System.Collections.Concurrent.ConcurrentDictionary<long, TaskTimings> timings = new();
     readonly Dictionary<string, CancellationTokenSource> activeTasks = new();
     DateTimeOffset nextSend;
@@ -107,7 +108,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     timing?.Approval(clock.Elapsed.TotalMilliseconds);
                 }
             }
-            : null, job.Settings, timing);
+            : null, job.Settings, timing, job.Sandbox);
         }
         finally
         {
@@ -427,6 +428,14 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                         return;
                     }
 
+                    if (command == "/permissions")
+                    {
+                        var argument = text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1)?.Trim() ?? "";
+
+                        permissionMenus.Apply(d, chat, argument, options);
+                        return;
+                    }
+
                     if (BotCommands.Apply(d, chat, text, options.ApprovalDefault))
                     {
                         return;
@@ -444,7 +453,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     }
                     else
                     {
-                        d.Jobs.Add(new Job(update.UpdateId, chat, text, Conversation: d.ActiveConversation, Attachments: files, ApprovalRequired: d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault), Settings: ModelSettings.For(d, d.ActiveConversation)));
+                        d.Jobs.Add(new Job(update.UpdateId, chat, text, Conversation: d.ActiveConversation, Attachments: files, ApprovalRequired: d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault), Settings: ModelSettings.For(d, d.ActiveConversation), Sandbox: d.SandboxFor(d.ActiveConversation, options.Sandbox)));
                         var selected = ModelSettings.For(d, d.ActiveConversation);
                         var report = new TimingReport(update.UpdateId, chat, d.ActiveConversation, receivedAt, message.Date, selected.Model ?? "Codex default", selected.Effort ?? "Codex default", (d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault)) ? "app-server" : "exec", "Queued", [new TimingPoint("Received", receivedAt, 0), new TimingPoint("Queued", DateTimeOffset.UtcNow, System.Diagnostics.Stopwatch.GetElapsedTime(receivedTick).TotalMilliseconds)], Version: Version);
 
@@ -510,6 +519,13 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 return;
             }
 
+            if (parts[0] == "perm")
+            {
+                answer = permissionMenus.Select(d, message!.Chat.Id, parts[1], options);
+                Journal.AddReply(d, message.Chat.Id, answer);
+                return;
+            }
+
             if (parts[0] == "choice")
             {
                 var result = modelMenus.Select(d, message!.Chat.Id, parts[1]);
@@ -569,7 +585,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
 
             if (state.Replies.Count < 100 && state.Schedules.Any(s => !s.Paused && s.NextRun <= now))
             {
-                await journal.ChangeAsync(d => Scheduling.EnqueueDue(d, now, options.ApprovalDefault), token);
+                await journal.ChangeAsync(d => Scheduling.EnqueueDue(d, now, options.ApprovalDefault, options.Sandbox), token);
             }
 
             await Task.Delay(1000, token);
@@ -634,7 +650,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             var stage = "dispatch";
             using var logScope = logger.BeginScope(new Dictionary<string, object> { ["TaskId"] = job.Id, ["Conversation"] = job.Conversation });
 
-            logger.LogInformation("Task {Id} started: conversation={Conversation}, mode={Mode}, model={Model}, effort={Effort}, sandbox={Sandbox}, attachments={Attachments}.", job.Id, job.Conversation, job.ApprovalRequired ? "app-server" : "exec", job.Settings?.Model ?? "default", job.Settings?.Effort ?? "default", job.ApprovalRequired ? "read-only" : options.Sandbox, job.Attachments?.Length ?? 0);
+            logger.LogInformation("Task {Id} started: conversation={Conversation}, mode={Mode}, model={Model}, effort={Effort}, sandbox={Sandbox}, attachments={Attachments}.", job.Id, job.Conversation, job.ApprovalRequired ? "app-server" : "exec", job.Settings?.Model ?? "default", job.Settings?.Effort ?? "default", job.ApprovalRequired ? "read-only" : job.Sandbox ?? options.Sandbox, job.Attachments?.Length ?? 0);
 
             try
             {

@@ -71,7 +71,7 @@ public static class Scheduling
         throw new ArgumentException("No upcoming occurrence found.");
     }
 
-    public static void EnqueueDue(JournalData data, DateTimeOffset now, bool defaultApproval)
+    public static void EnqueueDue(JournalData data, DateTimeOffset now, bool defaultApproval, string defaultSandbox = "workspace-write")
     {
         for (var i = 0; i < data.Schedules.Count; i++)
         {
@@ -84,7 +84,7 @@ public static class Scheduling
 
             if (!data.Jobs.Any(j => j.ScheduleId == schedule.Id))
             {
-                data.Jobs.Add(new Job(data.NextScheduledId--, schedule.ChatId, schedule.Prompt, Conversation: schedule.Conversation, ScheduleId: schedule.Id, ApprovalRequired: data.ApprovalFor(schedule.Conversation, defaultApproval), Settings: ModelSettings.For(data, schedule.Conversation)));
+                data.Jobs.Add(new Job(data.NextScheduledId--, schedule.ChatId, schedule.Prompt, Conversation: schedule.Conversation, ScheduleId: schedule.Id, ApprovalRequired: data.ApprovalFor(schedule.Conversation, defaultApproval), Settings: ModelSettings.For(data, schedule.Conversation), Sandbox: data.SandboxFor(schedule.Conversation, defaultSandbox)));
             }
 
             data.Schedules[i] = schedule with

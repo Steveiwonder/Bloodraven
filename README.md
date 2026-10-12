@@ -342,3 +342,11 @@ CLI returns a BTW error without resuming or resetting the primary conversation. 
 questions and replies are durable; a running question interrupted by service restart is
 reported as interrupted rather than replayed. Upgrade the service only when current work
 has finished.
+
+### Conversation permissions (0.4.2)
+
+Send `/permissions` for a menu, or `/permissions read-only`, `/permissions workspace-write`, `/permissions full`, `/permissions approvals`, or `/permissions default`. Settings belong to the selected conversation and persist across restarts. Full Access allows network access and files accessible to the service user without interactive approvals. Ask first uses the existing Telegram approval mode and its separate conversation history. Default removes both conversation overrides and restores the installation/legacy defaults.
+
+New messages and future scheduled runs capture the selected permissions when queued. Already queued and running work retains its submitted settings. `/approvals on` still tightens pending tasks as documented. BTW questions always keep their read-only policy. The menu shows submitted permissions, not a live inspection of Codex's current sandbox. Codex configuration, MCP tools and systemd/host restrictions still apply.
+
+Normal tasks use `codex exec`; Bloodraven cannot inject the interactive CLI `/permissions` command into an active process. This command does not repair mid-task permission drift or restart work automatically. To recover, choose the desired mode, `/cancel` the affected conversation, wait for it to stop, review any partial changes and then send a continuation. Saved conversation history is retained. Each new normal task explicitly supplies its sandbox and non-interactive approval policy to Codex.
