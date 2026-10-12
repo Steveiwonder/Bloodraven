@@ -77,13 +77,16 @@ public sealed class Journal(AppOptions options)
         try { return Clone(data); }
         finally { gate.Release(); }
     }
-    public async Task ChangeAsync(Action<JournalData> change, CancellationToken token)
+    public Task ChangeAsync(Action<JournalData> change, CancellationToken token) =>
+        ChangeWithAsync(d => { change(d); return Task.CompletedTask; }, token);
+
+    public async Task ChangeWithAsync(Func<JournalData, Task> change, CancellationToken token)
     {
         await gate.WaitAsync(token);
         try
         {
             var next = Clone(data);
-            change(next);
+            await change(next);
             await AtomicFile.WriteAsync(FilePath, JsonSerializer.Serialize(next), token);
             data = next;
             Interlocked.Exchange(ref changed, new(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();

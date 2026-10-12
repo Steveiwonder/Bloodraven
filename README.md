@@ -126,6 +126,7 @@ bash bloodraven-install.sh
 |---|---|
 | `/conversation homelab` | Create or switch to a named conversation |
 | `/conversations` | List conversations with switch buttons |
+| `/delete name` | Delete a named idle conversation, its pending work, schedules, settings and saved session links; retain Codex transcripts and repository files. The default conversation cannot be deleted. |
 | `/new` | Reset the selected conversation when this command reaches the queue |
 | `/status` | Show the active conversation, session, running task and queue depth |
 | `/health` | Show Bloodraven version, repository, live Codex/login check, polling, schedules and recent failures |
