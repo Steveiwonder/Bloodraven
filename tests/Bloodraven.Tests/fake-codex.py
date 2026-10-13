@@ -299,6 +299,29 @@ elif mode == "cli-rejected":
         file=sys.stderr,
     )
     sys.exit(2)
+elif mode in ("capacity-message", "capacity-code", "capacity-stderr"):
+    error = {
+        "message": "Selected model is at capacity. Please try a different model."
+        if mode != "capacity-code"
+        else "private stderr details test-secret",
+    }
+    if mode == "capacity-code":
+        error["codex_error_info"] = "server_overloaded"
+
+    if mode == "capacity-stderr":
+        print(error["message"], file=sys.stderr)
+        sys.exit(2)
+
+    print(
+        json.dumps(
+            {
+                "type": "error" if mode == "capacity-message" else "turn.failed",
+                "error": error,
+            }
+        ),
+        flush=True,
+    )
+    time.sleep(2)
 elif mode == "turn-failed":
     print(
         json.dumps(
