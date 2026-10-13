@@ -688,7 +688,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             {
                 logger.LogWarning("Task {Id} failed: stage={Stage}, session={SessionMode}, exit={ExitCode}, cause={Cause}, reason={Reason}, elapsedMs={ElapsedMs}.", job.Id, ex.Stage, ex.Resumed ? "resume" : "new", ex.ExitCode, ex.Cause, ex.Reason, elapsed.ElapsedMilliseconds);
                 outcome = "Failed";
-                result = $"Task {job.Id} failed: {ex.Reason}. Your conversation has been kept. Check the service logs for the failure stage and exit code.";
+                result = ex.UserMessage(job.Id);
             }
             catch (AppServerException ex)
             {
