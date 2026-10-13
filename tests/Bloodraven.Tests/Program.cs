@@ -1109,6 +1109,9 @@ static async Task RunnerFailures()
     foreach (var mode in new[]
     {
         "cli-rejected",
+        "capacity-message",
+        "capacity-code",
+        "capacity-stderr",
         "turn-failed",
         "failure"
     })
@@ -1124,6 +1127,15 @@ static async Task RunnerFailures()
         {
             Assert(ex.Resumed);
             Assert(!ex.ToString().Contains("private stderr details") && !ex.ToString().Contains("private prompt") && !ex.ToString().Contains("test-secret"));
+            if (mode.StartsWith("capacity-"))
+            {
+                Assert(ex.Reason == CodexFailure.ModelCapacity);
+                var message = ex.UserMessage(123);
+                Assert(message.Contains("at capacity") && message.Contains("/model") && message.Contains("continuation"));
+                Assert(!message.Contains("service logs") && !message.Contains("test-secret"));
+                Assert(await sessions.GetAsync(default) == "11111111-1111-1111-1111-111111111111");
+            }
+
             if (mode == "cli-rejected")
             {
                 Assert(ex.ExitCode == 2 && ex.Stage == "process-exit" && ex.Reason.StartsWith("CLI arguments rejected"));

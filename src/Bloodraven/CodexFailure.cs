@@ -4,6 +4,18 @@ namespace Bloodraven;
 // contain prompts, credentials, URLs or command output and are never logged.
 public sealed class CodexFailure(string stage, string reason, bool resumed, int? exitCode = null, string? cause = null) : InvalidOperationException($"Codex failed during {stage}: {reason}.")
 {
+    public const string ModelCapacity = "selected model is at capacity";
+
+    public string UserMessage(long taskId)
+    {
+        if (Reason == ModelCapacity)
+        {
+            return $"Task {taskId} stopped because the selected Codex model is at capacity. Your conversation has been kept. Wait a moment and send a continuation message, or use /model to choose another model before continuing. The task may already have made changes; ask Codex to check what completed before repeating any steps.";
+        }
+
+        return $"Task {taskId} failed: {Reason}. Your conversation has been kept. Check the service logs for the failure stage and exit code.";
+    }
+
     public string Stage { get; } = stage;
     public string Reason { get; } = reason;
     public bool Resumed { get; } = resumed;
@@ -22,6 +34,11 @@ public sealed class CodexFailure(string stage, string reason, bool resumed, int?
         if (text.Contains("context window") || text.Contains("context length") || text.Contains("too many tokens"))
         {
             return "context limit reached";
+        }
+
+        if (text.Contains("server_overloaded") || text.Contains("model is at capacity"))
+        {
+            return ModelCapacity;
         }
 
         if (text.Contains("usage limit") || text.Contains("quota") || text.Contains("rate limit"))
