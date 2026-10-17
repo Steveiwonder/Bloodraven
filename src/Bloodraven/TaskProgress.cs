@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 namespace Bloodraven;
 
 // Keep only the latest activity. Progress is transient, never journalled or replayed.
-public sealed class TaskProgress(string? botToken = null)
+public sealed class TaskProgress(string? botToken = null, string engine = "codex")
 {
     readonly object gate = new();
     readonly Stopwatch elapsed = Stopwatch.StartNew();
@@ -180,7 +180,7 @@ public sealed class TaskProgress(string? botToken = null)
             {
                 if (kind.GetString() == "mcp_tool_call")
                 {
-                    message = "Codex is using a tool.";
+                    message = $"{Engines.Label(engine)} is using a tool.";
                 }
             }
         }

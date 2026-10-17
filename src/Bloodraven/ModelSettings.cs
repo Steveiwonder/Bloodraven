@@ -6,13 +6,18 @@ namespace Bloodraven;
 // Immutable so a queued task keeps its submitted settings through later edits/restarts.
 public sealed record ModelSettings(string? Model = null, string? Effort = null)
 {
-    public static ModelSettings For(JournalData data, string conversation) => data.ModelSettings.GetValueOrDefault(conversation) ?? new();
+    public static ModelSettings For(JournalData data, string conversation) => (data.EngineFor(conversation) == "claude" ? data.ClaudeModelSettings : data.ModelSettings).GetValueOrDefault(conversation) ?? new();
+
+    public static void Save(JournalData data, string conversation, ModelSettings settings)
+    {
+        (data.EngineFor(conversation) == "claude" ? data.ClaudeModelSettings : data.ModelSettings)[conversation] = settings;
+    }
 
     public static bool ValidModel(string value) => Regex.IsMatch(value, @"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\z");
 
     public static bool ValidEffort(string value) => value is "none" or "minimal" or "low" or "medium" or "high" or "xhigh" or "max" or "ultra";
 
-    public string Describe() => $"Model: {Model ?? "Codex default"}\nReasoning: {Effort ?? "Codex default"}";
+    public string Describe(string engine = "codex") => $"Model: {Model ?? Engines.Label(engine) + " default"}\nReasoning: {Effort ?? Engines.Label(engine) + " default"}";
 
     public void Validate()
     {

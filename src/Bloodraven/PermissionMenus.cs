@@ -15,6 +15,12 @@ public sealed class PermissionMenus
 
     public void Apply(JournalData data, long chat, string argument, AppOptions options)
     {
+        if (data.EngineFor(data.ActiveConversation) == "claude")
+        {
+            Engines.Apply(data, chat, "/permissions", argument);
+            return;
+        }
+
         var conversation = data.ActiveConversation;
 
         if (argument.Length == 0)
@@ -86,7 +92,7 @@ public sealed class PermissionMenus
     {
         var parts = payload.Split(':');
 
-        if (parts.Length != 2 || !menus.TryGetValue(parts[0], out var menu) || menu.Chat != chat || menu.Conversation != data.ActiveConversation || menu.Expires < DateTimeOffset.UtcNow || !Values.Contains(parts[1]) || menu.Sandbox != data.ConversationSandboxes.GetValueOrDefault(menu.Conversation) || menu.Approvals != data.ApprovalFor(menu.Conversation, options.ApprovalDefault))
+        if (parts.Length != 2 || !menus.TryGetValue(parts[0], out var menu) || data.EngineFor(data.ActiveConversation) != "codex" || menu.Chat != chat || menu.Conversation != data.ActiveConversation || menu.Expires < DateTimeOffset.UtcNow || !Values.Contains(parts[1]) || menu.Sandbox != data.ConversationSandboxes.GetValueOrDefault(menu.Conversation) || menu.Approvals != data.ApprovalFor(menu.Conversation, options.ApprovalDefault))
         {
             return "Menu expired or conversation/settings changed. Open /permissions again.";
         }

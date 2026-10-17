@@ -70,7 +70,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         timing?.Mark("Attachments started");
         var (prompt, images) = await attachments.PrepareAsync(job, token);
         timing?.Mark("Attachments ready");
-        var progress = new TaskProgress(options.TelegramBotToken);
+        var progress = new TaskProgress(options.TelegramBotToken, job.Engine);
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         var reporting = progress.RunAsync(TimeSpan.FromSeconds(options.ProgressIntervalSeconds), async (text, ct) =>
         {
@@ -108,7 +108,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     timing?.Approval(clock.Elapsed.TotalMilliseconds);
                 }
             }
-            : null, job.Settings, timing, job.Sandbox);
+            : null, job.Settings, timing, job.Sandbox, job.Engine, job.ClaudePermission);
         }
         finally
         {
@@ -167,7 +167,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
 
         try
         {
-            session = await sessions.GetAsync(token, state.ActiveConversation, state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault));
+            session = await sessions.GetAsync(token, state.ActiveConversation, state.EngineFor(state.ActiveConversation) == "codex" && state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault), state.EngineFor(state.ActiveConversation));
         }
         catch (InvalidDataException)
         {
@@ -175,7 +175,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
         }
 
         var running = state.Jobs.FirstOrDefault(j => j.Running && j.Conversation == state.ActiveConversation);
-        var text = $"Bloodraven {Version}\nStatus: {(running is not null ? "working" : "idle")}\nConversation: {state.ActiveConversation}\n{ModelSettings.For(state, state.ActiveConversation).Describe()}\nSession: {session ?? "none"}\nRunning: {(running is null ? "none" : $"{running.Id} ({running.Conversation})")}\nWaiting: {state.Jobs.Count(j => !j.Running && j.Conversation == state.ActiveConversation)}\nPending replies (all conversations): {state.Replies.Count}\nApproval requests: {approvals.CountFor(state.ActiveConversation)}";
+        var text = $"Bloodraven {Version}\nStatus: {(running is not null ? "working" : "idle")}\nConversation: {state.ActiveConversation}\nEngine: {state.EngineFor(state.ActiveConversation)}\n{ModelSettings.For(state, state.ActiveConversation).Describe(state.EngineFor(state.ActiveConversation))}\nSession: {session ?? "none"}\nRunning: {(running is null ? "none" : $"{running.Id} ({running.Conversation}, {running.Engine})")}\nWaiting: {state.Jobs.Count(j => !j.Running && j.Conversation == state.ActiveConversation)}\nPending replies (all conversations): {state.Replies.Count}\nApproval requests: {approvals.CountFor(state.ActiveConversation)}";
 
         if (health)
         {
@@ -186,7 +186,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
 
             try
             {
-                await Preflight.CheckAsync(options, check.Token);
+                await Preflight.CheckAsync(options, check.Token, state.EngineFor(state.ActiveConversation));
                 availability = "repository, executable and login checks passed now";
             }
             catch (OperationCanceledException) when (!token.IsCancellationRequested)
@@ -199,10 +199,10 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             }
             catch (Exception)
             {
-                availability = "check failed; inspect the local Codex login and repository permissions";
+                availability = "check failed; inspect the selected CLI login and repository permissions";
             }
 
-            text += $"\nRepository: {options.WorkingDirectory}\nCodex: {availability}\nLast successful poll: {lastPoll:O}\nApprovals: {((state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault)) ? "on" : "off")}\nSchedules: {state.Schedules.Count(s => !s.Paused && s.Conversation == state.ActiveConversation)} enabled\nRecent failures:";
+            text += $"\nRepository: {options.WorkingDirectory}\n{Engines.Label(state.EngineFor(state.ActiveConversation))}: {availability}\nLast successful poll: {lastPoll:O}\nApprovals: {(state.EngineFor(state.ActiveConversation) == "claude" ? "not supported (Claude)" : state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault) ? "on" : "off")}\nSchedules: {state.Schedules.Count(s => !s.Paused && s.Conversation == state.ActiveConversation)} enabled\nRecent failures:";
             var failures = state.Outcomes.Where(o => o.Status != "Completed" && o.Conversation == state.ActiveConversation).TakeLast(5).ToArray();
 
             text += failures.Length == 0 ? " none" : "\n" + string.Join('\n', failures.Select(o => $"{o.Finished:yyyy-MM-dd HH:mm} UTC · {o.Conversation} · {o.Status}"));
@@ -283,7 +283,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
 
                 var command = Command(text);
                 IReadOnlyList<AvailableModel>? catalogue = null;
-                var menuRequested = allowed && (command is "/model" or "/effort" or "/reasoning") && text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length == 1;
+                var menuRequested = state.EngineFor(state.ActiveConversation) == "codex" && allowed && (command is "/model" or "/effort" or "/reasoning") && text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length == 1;
 
                 if (menuRequested)
                 {
@@ -310,11 +310,11 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 var status = allowed && command is "/status" or "/health" ? await StatusAsync(state, command == "/health", token) : null;
                 string? sideSession = null;
 
-                if (allowed && error is null && command == "/btw")
+                if (allowed && error is null && command == "/btw" && state.EngineFor(state.ActiveConversation) == "codex")
                 {
                     try
                     {
-                        sideSession = await sessions.GetAsync(token, state.ActiveConversation, state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault));
+                        sideSession = await sessions.GetAsync(token, state.ActiveConversation, state.EngineFor(state.ActiveConversation) == "codex" && state.ApprovalFor(state.ActiveConversation, options.ApprovalDefault), state.EngineFor(state.ActiveConversation));
                     }
                     catch (InvalidDataException)
                     {
@@ -347,6 +347,11 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     if (text.Length > 16384)
                     {
                         Journal.AddReply(d, chat, "Message too large (maximum 16,384 characters).");
+                        return;
+                    }
+
+                    if (d.EngineFor(d.ActiveConversation) == "claude" && Engines.Apply(d, chat, command, text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1)?.Trim() ?? ""))
+                    {
                         return;
                     }
 
@@ -453,9 +458,9 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                     }
                     else
                     {
-                        d.Jobs.Add(new Job(update.UpdateId, chat, text, Conversation: d.ActiveConversation, Attachments: files, ApprovalRequired: d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault), Settings: ModelSettings.For(d, d.ActiveConversation), Sandbox: d.SandboxFor(d.ActiveConversation, options.Sandbox)));
+                        d.Jobs.Add(new Job(update.UpdateId, chat, text, Conversation: d.ActiveConversation, Attachments: files, ApprovalRequired: d.EngineFor(d.ActiveConversation) == "codex" && d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault), Settings: ModelSettings.For(d, d.ActiveConversation), Sandbox: d.SandboxFor(d.ActiveConversation, options.Sandbox), Engine: d.EngineFor(d.ActiveConversation), ClaudePermission: Engines.ClaudePermissionFor(d, d.ActiveConversation)));
                         var selected = ModelSettings.For(d, d.ActiveConversation);
-                        var report = new TimingReport(update.UpdateId, chat, d.ActiveConversation, receivedAt, message.Date, selected.Model ?? "Codex default", selected.Effort ?? "Codex default", (d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault)) ? "app-server" : "exec", "Queued", [new TimingPoint("Received", receivedAt, 0), new TimingPoint("Queued", DateTimeOffset.UtcNow, System.Diagnostics.Stopwatch.GetElapsedTime(receivedTick).TotalMilliseconds)], Version: Version);
+                        var report = new TimingReport(update.UpdateId, chat, d.ActiveConversation, receivedAt, message.Date, selected.Model ?? Engines.Label(d.EngineFor(d.ActiveConversation)) + " default", selected.Effort ?? Engines.Label(d.EngineFor(d.ActiveConversation)) + " default", d.EngineFor(d.ActiveConversation) == "claude" ? "claude-print" : d.ApprovalFor(d.ActiveConversation, options.ApprovalDefault) ? "app-server" : "exec", "Queued", [new TimingPoint("Received", receivedAt, 0), new TimingPoint("Queued", DateTimeOffset.UtcNow, System.Diagnostics.Stopwatch.GetElapsedTime(receivedTick).TotalMilliseconds)], Version: Version);
 
                         timings[update.UpdateId] = new TaskTimings(report);
                         TaskTimings.Save(d, report);
@@ -650,7 +655,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             var stage = "dispatch";
             using var logScope = logger.BeginScope(new Dictionary<string, object> { ["TaskId"] = job.Id, ["Conversation"] = job.Conversation });
 
-            logger.LogInformation("Task {Id} started: conversation={Conversation}, mode={Mode}, model={Model}, effort={Effort}, sandbox={Sandbox}, attachments={Attachments}.", job.Id, job.Conversation, job.ApprovalRequired ? "app-server" : "exec", job.Settings?.Model ?? "default", job.Settings?.Effort ?? "default", job.ApprovalRequired ? "read-only" : job.Sandbox ?? options.Sandbox, job.Attachments?.Length ?? 0);
+            logger.LogInformation("Task {Id} started: conversation={Conversation}, engine={Engine}, mode={Mode}, model={Model}, effort={Effort}, sandbox={Sandbox}, attachments={Attachments}.", job.Id, job.Conversation, job.Engine, job.ApprovalRequired ? "app-server" : "exec", job.Settings?.Model ?? "default", job.Settings?.Effort ?? "default", job.Engine == "claude" ? job.ClaudePermission ?? "dontAsk" : job.ApprovalRequired ? "read-only" : job.Sandbox ?? options.Sandbox, job.Attachments?.Length ?? 0);
 
             try
             {
@@ -658,8 +663,8 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
                 {
                     case "/new":
                         stage = "session-reset";
-                        await sessions.ClearAsync(taskLifetime.Token, job.Conversation);
-                        result = $"Started a fresh Codex conversation: {job.Conversation}.";
+                        await sessions.ClearAsync(taskLifetime.Token, job.Conversation, job.Engine);
+                        result = $"Started a fresh {Engines.Label(job.Engine)} conversation: {job.Conversation}.";
                         break;
 
                     case "/file":
@@ -688,7 +693,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             {
                 logger.LogWarning("Task {Id} failed: stage={Stage}, session={SessionMode}, exit={ExitCode}, cause={Cause}, reason={Reason}, elapsedMs={ElapsedMs}.", job.Id, ex.Stage, ex.Resumed ? "resume" : "new", ex.ExitCode, ex.Cause, ex.Reason, elapsed.ElapsedMilliseconds);
                 outcome = "Failed";
-                result = ex.UserMessage(job.Id);
+                result = job.Engine == "claude" ? ex.UserMessage(job.Id).Replace("Codex", "Claude") : ex.UserMessage(job.Id);
             }
             catch (AppServerException ex)
             {
@@ -706,7 +711,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             {
                 logger.LogWarning("Task {Id} failed at {Stage}: {ErrorType}, hresult={HResult}, elapsedMs={ElapsedMs}. Check local filesystem permissions, executable availability and session storage.", job.Id, stage, ex.GetType().Name, ex.HResult, elapsed.ElapsedMilliseconds);
                 outcome = "Failed";
-                result = $"Task {job.Id} failed. Check service logs, Codex login, repository permissions and attachments. Your conversation has been kept. Review changes before retrying.";
+                result = $"Task {job.Id} failed. Check service logs, {Engines.Label(job.Engine)} login, repository permissions and attachments. Your conversation has been kept. Review changes before retrying.";
             }
             finally
             {
@@ -719,7 +724,7 @@ public sealed class BotWorker(TelegramClient telegram, CodexRunner codex, Sessio
             logger.LogInformation("Task {Id} finished: {Outcome}, elapsedMs={ElapsedMs}.", job.Id, outcome, elapsed.ElapsedMilliseconds);
             if (outcome == "Failed" && job.Settings is { } selected && (selected.Model is not null || selected.Effort is not null))
             {
-                result += $"\nSubmitted settings:\n{selected.Describe()}\nCheck that your Codex login and model support these choices; /model and /reasoning change settings for new tasks.";
+                result += $"\nSubmitted settings:\n{selected.Describe(job.Engine)}\nCheck that your {Engines.Label(job.Engine)} login and model support these choices; /model and /reasoning change settings for new tasks.";
             }
 
             await journal.ChangeAsync(d =>

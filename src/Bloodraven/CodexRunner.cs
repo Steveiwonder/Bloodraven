@@ -35,8 +35,14 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
         }
     }
 
-    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null, string conversation = "default", IReadOnlyList<string>? images = null, Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null, ModelSettings? settings = null, TaskTimings? timing = null, string? sandbox = null)
+    public async Task<string> RunAsync(string prompt, CancellationToken stoppingToken, Action<JsonElement>? progress = null, string conversation = "default", IReadOnlyList<string>? images = null, Func<string, JsonElement, CancellationToken, Task<bool>>? approve = null, ModelSettings? settings = null, TaskTimings? timing = null, string? sandbox = null, string engine = "codex", string? claudePermission = null)
     {
+        Engines.Validate(engine);
+        if (engine == "claude" && approve is not null)
+        {
+            throw new ArgumentException("Telegram approvals are not supported by the Claude runner.");
+        }
+
         if (sandbox is not null && !PermissionMenus.ValidSandbox(sandbox))
         {
             throw new InvalidDataException("Invalid saved permission mode.");
@@ -64,7 +70,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
 
             try
             {
-                sessionId = await sessions.GetAsync(run.Token, conversation);
+                sessionId = await sessions.GetAsync(run.Token, conversation, engine: engine);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -72,7 +78,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
             }
 
             timing?.Mark(sessionId is null ? "New session" : "Resuming session");
-            var start = new ProcessStartInfo(options.CodexExecutable)
+            var start = new ProcessStartInfo(engine == "claude" ? options.ClaudeExecutable : options.CodexExecutable)
             {
                 WorkingDirectory = options.WorkingDirectory,
                 UseShellExecute = false,
@@ -82,36 +88,44 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
             };
 
             options.RemoveBridgeSecrets(start);
-            (settings ?? new()).AddArguments(start);
-            start.ArgumentList.Add("--ask-for-approval");
-            start.ArgumentList.Add("never");
+            if (engine == "claude")
+            {
+                ClaudeProtocol.Configure(start, sessionId, settings ?? new(), claudePermission ?? "dontAsk", images?.Count > 0);
+            }
+            else
+            {
+                (settings ?? new()).AddArguments(start);
+                start.ArgumentList.Add("--ask-for-approval");
+                start.ArgumentList.Add("never");
 
-            foreach (var arg in new[]
-            {
-                "-C",
-                options.WorkingDirectory,
-                "exec",
-                "--json",
-                "--sandbox",
-                sandbox ?? options.Sandbox
-            })
-            {
-                start.ArgumentList.Add(arg);
+                foreach (var arg in new[]
+                {
+                    "-C",
+                    options.WorkingDirectory,
+                    "exec",
+                    "--json",
+                    "--sandbox",
+                    sandbox ?? options.Sandbox
+                })
+                {
+                    start.ArgumentList.Add(arg);
+                }
+
+                if (sessionId is not null)
+                {
+                    start.ArgumentList.Add("resume");
+                    start.ArgumentList.Add(sessionId);
+                }
+
+                foreach (var path in images ?? [])
+                {
+                    start.ArgumentList.Add("--image");
+                    start.ArgumentList.Add(path);
+                }
+
+                start.ArgumentList.Add("-"); // Prompts are stdin data, never CLI options.
             }
 
-            if (sessionId is not null)
-            {
-                start.ArgumentList.Add("resume");
-                start.ArgumentList.Add(sessionId);
-            }
-
-            foreach (var path in images ?? [])
-            {
-                start.ArgumentList.Add("--image");
-                start.ArgumentList.Add(path);
-            }
-
-            start.ArgumentList.Add("-"); // Prompts are stdin data, never CLI options.
             Process StartProcess()
             {
                 try
@@ -120,7 +134,7 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 }
                 catch (Exception ex)
                 {
-                    throw new CodexFailure("process-start", "could not launch Codex; check executable path and service permissions", sessionId is not null, cause: ex.GetType().Name);
+                    throw new CodexFailure("process-start", "could not launch the selected CLI; check executable path and service permissions", sessionId is not null, cause: ex.GetType().Name);
                 }
             }
 
@@ -178,12 +192,12 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
 
                     timing?.Mark("First event", first: true);
                     using var json = JsonDocument.Parse(line);
-                    var root = json.RootElement;
+                    var root = engine == "claude" ? ClaudeProtocol.Normalize(json.RootElement) : json.RootElement;
                     var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
 
                     if (type == "thread.started" && root.TryGetProperty("thread_id", out var id))
                     {
-                        await sessions.SetAsync(id.GetString()!, run.Token, conversation);
+                        await sessions.SetAsync(id.GetString()!, run.Token, conversation, engine: engine);
                     }
 
                     if (type is "turn.failed" or "error")
@@ -221,7 +235,9 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
             });
             var input = Guard(async () =>
             {
-                await process.StandardInput.WriteAsync(prompt.AsMemory(), run.Token);
+                var inputText = engine == "claude" ? await ClaudeProtocol.InputAsync(prompt, images ?? [], run.Token) : prompt;
+
+                await process.StandardInput.WriteAsync(inputText.AsMemory(), run.Token);
                 process.StandardInput.Close();
                 timing?.Mark("Prompt sent");
             });
@@ -233,6 +249,11 @@ public sealed class CodexRunner(AppOptions options, SessionStore sessions)
                 if (process.ExitCode != 0)
                 {
                     throw new CodexFailure("process-exit", CodexFailure.Classify(diagnostic.ToString()), sessionId is not null, process.ExitCode);
+                }
+
+                if (engine == "claude" && finalMessage is null)
+                {
+                    throw new CodexFailure("result", "CLI exited without a final result; review changes before retrying", sessionId is not null, process.ExitCode);
                 }
 
                 return finalMessage ?? "Codex finished without a final message.";

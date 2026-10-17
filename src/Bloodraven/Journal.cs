@@ -4,7 +4,7 @@ namespace Bloodraven;
 
 public sealed record Attachment(string FileId, string Name, bool Image, long Size = 0);
 
-public sealed record Job(long Id, long ChatId, string Text, bool Running = false, string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null, long? ProgressMessageId = null, bool ApprovalRequired = false, ModelSettings? Settings = null, string? Sandbox = null);
+public sealed record Job(long Id, long ChatId, string Text, bool Running = false, string Conversation = "default", Attachment[]? Attachments = null, string? ScheduleId = null, long? ProgressMessageId = null, bool ApprovalRequired = false, ModelSettings? Settings = null, string? Sandbox = null, string Engine = "codex", string? ClaudePermission = null);
 
 public sealed record SideQuestion(long Id, long ChatId, string Question, string Conversation, string SessionId, ModelSettings Settings, bool Running = false);
 
@@ -32,6 +32,12 @@ public sealed class JournalData
     {
         get; set;
     } // Legacy default retained for existing installations.
+    public Dictionary<string, string> ConversationEngines { get; set; } = [];
+    public Dictionary<string, ModelSettings> ClaudeModelSettings { get; set; } = [];
+    public Dictionary<string, string> ClaudePermissions { get; set; } = [];
+
+    public string EngineFor(string conversation) => ConversationEngines.GetValueOrDefault(conversation) ?? "codex";
+
     public Dictionary<string, string> ConversationSandboxes { get; set; } = [];
 
     public string SandboxFor(string conversation, string fallback) => ConversationSandboxes.GetValueOrDefault(conversation) ?? fallback;
@@ -66,7 +72,7 @@ public sealed class Journal(AppOptions options)
         {
             for (var i = 0; i < d.Jobs.Count; i++)
             {
-                if (!d.Jobs[i].Running && d.Jobs[i].Sandbox is null && d.ApprovalFor(d.Jobs[i].Conversation, options.ApprovalDefault))
+                if (d.Jobs[i].Engine == "codex" && !d.Jobs[i].Running && d.Jobs[i].Sandbox is null && d.ApprovalFor(d.Jobs[i].Conversation, options.ApprovalDefault))
                 {
                     d.Jobs[i] = d.Jobs[i] with
                     {
@@ -166,6 +172,9 @@ public sealed class Journal(AppOptions options)
         Approvals = value.Approvals,
         ConversationApprovals = new(value.ConversationApprovals),
         ConversationSandboxes = new(value.ConversationSandboxes),
+        ConversationEngines = new(value.ConversationEngines),
+        ClaudeModelSettings = new(value.ClaudeModelSettings),
+        ClaudePermissions = new(value.ClaudePermissions),
         NextScheduledId = value.NextScheduledId,
         ModelSettings = new(value.ModelSettings)
     };
@@ -202,23 +211,29 @@ public sealed class SessionStore(AppOptions options)
 
     public static bool ValidName(string name) => NamePattern.IsMatch(name);
 
-    string FilePath(string name, bool approved)
+    string FilePath(string name, bool approved, string engine = "codex")
     {
         if (!ValidName(name))
         {
             throw new InvalidDataException("Conversation names use 1–32 lowercase letters, digits, underscores or hyphens.");
         }
 
+        Engines.Validate(engine);
+        if (engine == "claude")
+        {
+            return Path.Combine(options.StateDirectory, "sessions", name + ".claude.txt");
+        }
+
         return name == "default" && !approved ? Path.Combine(options.StateDirectory, "session.txt") : Path.Combine(options.StateDirectory, "sessions", name + (approved ? ".approved" : "") + ".txt");
     }
 
-    public async Task<string?> GetAsync(CancellationToken token, string name = "default", bool approved = false)
+    public async Task<string?> GetAsync(CancellationToken token, string name = "default", bool approved = false, string engine = "codex")
     {
         await gate.WaitAsync(token);
 
         try
         {
-            var path = FilePath(name, approved);
+            var path = FilePath(name, approved, engine);
 
             if (!File.Exists(path))
             {
@@ -237,18 +252,18 @@ public sealed class SessionStore(AppOptions options)
 
     static bool ValidId(string id) => System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_-]{1,128}\\z");
 
-    public async Task SetAsync(string id, CancellationToken token, string name = "default", bool approved = false)
+    public async Task SetAsync(string id, CancellationToken token, string name = "default", bool approved = false, string engine = "codex")
     {
         if (!ValidId(id))
         {
-            throw new InvalidDataException("Codex returned an invalid session ID.");
+            throw new InvalidDataException("CLI returned an invalid session ID.");
         }
 
         await gate.WaitAsync(token);
 
         try
         {
-            await AtomicFile.WriteAsync(FilePath(name, approved), id, token);
+            await AtomicFile.WriteAsync(FilePath(name, approved, engine), id, token);
         }
         finally
         {
@@ -256,7 +271,7 @@ public sealed class SessionStore(AppOptions options)
         }
     }
 
-    public async Task ClearAsync(CancellationToken token, string name = "default")
+    public async Task ClearAsync(CancellationToken token, string name = "default", string engine = "codex")
     {
         await gate.WaitAsync(token);
 
@@ -264,8 +279,8 @@ public sealed class SessionStore(AppOptions options)
         {
             foreach (var path in new[]
             {
-                FilePath(name, false),
-                FilePath(name, true)
+                FilePath(name, false, engine),
+                FilePath(name, true, engine)
             })
             {
                 if (File.Exists(path))
