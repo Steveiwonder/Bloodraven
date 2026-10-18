@@ -84,7 +84,7 @@ public static class Scheduling
 
             if (!data.Jobs.Any(j => j.ScheduleId == schedule.Id))
             {
-                data.Jobs.Add(new Job(data.NextScheduledId--, schedule.ChatId, schedule.Prompt, Conversation: schedule.Conversation, ScheduleId: schedule.Id, ApprovalRequired: data.ApprovalFor(schedule.Conversation, defaultApproval), Settings: ModelSettings.For(data, schedule.Conversation), Sandbox: data.SandboxFor(schedule.Conversation, defaultSandbox)));
+                data.Jobs.Add(new Job(data.NextScheduledId--, schedule.ChatId, schedule.Prompt, Conversation: schedule.Conversation, ScheduleId: schedule.Id, ApprovalRequired: data.EngineFor(schedule.Conversation) == "codex" && data.ApprovalFor(schedule.Conversation, defaultApproval), Settings: ModelSettings.For(data, schedule.Conversation), Sandbox: data.SandboxFor(schedule.Conversation, defaultSandbox), Engine: data.EngineFor(schedule.Conversation), ClaudePermission: Engines.ClaudePermissionFor(data, schedule.Conversation)));
             }
 
             data.Schedules[i] = schedule with

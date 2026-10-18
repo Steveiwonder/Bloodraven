@@ -41,12 +41,12 @@ public sealed class CodexFailure(string stage, string reason, bool resumed, int?
             return ModelCapacity;
         }
 
-        if (text.Contains("usage limit") || text.Contains("quota") || text.Contains("rate limit"))
+        if (text.Contains("usage limit") || text.Contains("quota") || text.Contains("rate limit") || text.Contains("rate_limit") || text.Contains("credit balance") || text.Contains("insufficient credits"))
         {
             return "usage or rate limit reached";
         }
 
-        if (text.Contains("unauthorized") || text.Contains("authentication") || text.Contains("refresh token") || text.Contains("not logged in"))
+        if (text.Contains("unauthorized") || text.Contains("authentication") || text.Contains("refresh token") || text.Contains("not logged in") || text.Contains("authentication_failed") || text.Contains("invalid api key"))
         {
             return "authentication rejected; check Codex login as the service user";
         }

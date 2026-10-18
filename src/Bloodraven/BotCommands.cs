@@ -2,7 +2,7 @@ namespace Bloodraven;
 
 public static class BotCommands
 {
-    public const string Help = "Bloodraven — task commands apply to the selected conversation.\n/conversation name — create or switch conversation\n/conversations — list conversations\n/delete name — delete an idle conversation\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks in this conversation\n/btw question — ask a side question while work continues\n/cancel — stop this conversation’s running task\n/schedule — recurring task help\n/permissions — choose permissions for this conversation\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
+    public const string Help = "Bloodraven — task commands apply to the selected conversation.\n/engine codex|claude — select engine for new tasks\n/conversation name — create or switch conversation\n/conversations — list conversations\n/delete name — delete an idle conversation\n/new — reset the current conversation\n/model — list and choose a model\n/effort — list and choose reasoning effort\n/reasoning — alias for /effort\n/preset fast|balanced|thorough|default — reasoning shortcuts\n/queue — inspect, remove or move pending tasks\n/clear — remove pending tasks in this conversation\n/btw question — ask a side question while work continues\n/cancel — stop this conversation’s running task\n/schedule — recurring task help\n/permissions — choose permissions for this conversation\n/approvals on|off — native Codex approval buttons\n/health — diagnostics\n/status — current work\n/timings [task ID] — last prompt timing breakdown\n/file relative/path — download a repository file\nSend a photo or document with an optional caption.";
 
     public static bool Apply(JournalData data, long chat, string text, bool defaultApproval)
     {
@@ -12,6 +12,11 @@ public static class BotCommands
         var argument = text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1)?.Trim() ?? "";
 
         void Reply(string value, InlineButton[][]? buttons = null) => data.Replies.Add(new Reply(Guid.NewGuid().ToString("N"), chat, value, Buttons: buttons));
+
+        if (Engines.Apply(data, chat, command, argument))
+        {
+            return true;
+        }
 
         switch (command)
         {
@@ -68,7 +73,7 @@ public static class BotCommands
                     };
                 }
 
-                data.ModelSettings[data.ActiveConversation] = settings;
+                ModelSettings.Save(data, data.ActiveConversation, settings);
                 Reply($"Saved for {data.ActiveConversation}.\n{settings.Describe()}\nApplies to newly queued tasks, including future scheduled runs. Running and queued tasks keep their settings. Defaults remove Bloodraven overrides; Codex controls inherited settings. Unsupported choices may be rejected by Codex.");
                 return true;
 
@@ -145,7 +150,7 @@ public static class BotCommands
                 {
                     for (var i = 0; i < data.Jobs.Count; i++)
                     {
-                        if (!data.Jobs[i].Running && data.Jobs[i].Conversation == conversation)
+                        if (data.Jobs[i].Engine == "codex" && !data.Jobs[i].Running && data.Jobs[i].Conversation == conversation)
                         {
                             data.Jobs[i] = data.Jobs[i] with
                             {
@@ -208,12 +213,16 @@ public static class BotCommands
         }
 
         await sessions.ClearAsync(token, name);
+        await sessions.ClearAsync(token, name, "claude");
         data.Jobs.RemoveAll(j => j.Conversation == name);
         data.SideQuestions.RemoveAll(q => q.Conversation == name);
         data.Schedules.RemoveAll(s => s.Conversation == name);
         data.Outcomes.RemoveAll(o => o.Conversation == name);
         data.Timings.RemoveAll(t => t.Conversation == name);
         data.ModelSettings.Remove(name);
+        data.ClaudeModelSettings.Remove(name);
+        data.ClaudePermissions.Remove(name);
+        data.ConversationEngines.Remove(name);
         data.ConversationApprovals.Remove(name);
         data.ConversationSandboxes.Remove(name);
         data.Conversations.Remove(name);
@@ -222,7 +231,7 @@ public static class BotCommands
             data.ActiveConversation = "default";
         }
 
-        Reply($"Deleted conversation {name}, its pending tasks, schedules and settings. Active conversation: {data.ActiveConversation}. Codex transcript files and repository files are retained.");
+        Reply($"Deleted conversation {name}, its pending tasks, schedules and settings. Active conversation: {data.ActiveConversation}. CLI transcript files and repository files are retained.");
     }
 
     static string Preview(string text) => text.Replace('\n', ' ').Replace('\r', ' ') is var one && one.Length > 70 ? one[..70] + "…" : one;

@@ -31,3 +31,18 @@ Schedules execute real tasks with the current approval mode and the configured s
 ## Concurrent conversations
 
 Conversations have independent queues and cancellation, but share the service account, filesystem, configured repository and external credentials. They are not security or filesystem isolation boundaries. Avoid concurrent tasks that edit the same files or deploy to the same target. A fatal process-cleanup failure still stops the whole service and drains all conversation workers. Approval preferences are saved per conversation; the legacy global preference remains the fallback for conversations without an override.
+
+## Claude engine
+
+Claude sessions and preferences are separate from Codex, but both CLIs run as
+the same service user in the same repository. Engine switching is not a security
+isolation boundary. Each CLI loads its own configuration and integrations.
+Claude starts with `dontAsk`; a Codex Full Access setting is never inherited.
+`/permissions full` explicitly selects Claude's `bypassPermissions` for new jobs.
+Claude permission modes do not provide Codex's OS sandbox. Native Telegram
+approval buttons and BTW forks remain Codex-only. Bridge secrets are stripped
+and diagnostic output is bounded and classified for both engines.
+
+Do not downgrade a 0.5 journal to an older binary: old binaries do not understand
+engine-tagged jobs and could send Claude work to Codex. Back up state before any
+manual downgrade and never reuse newer pending jobs with an older version.

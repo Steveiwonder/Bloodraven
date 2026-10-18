@@ -7,6 +7,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("worker switches engines while retaining running and queued tasks", WorkerEngines),
+    ("engine settings, queues and sessions remain isolated", EngineSettings),
+    ("Claude print protocol, resume, cancellation and safe failures", ClaudeExecution),
     ("permissions persist, bind menus and reach new/resumed runners", Permissions),
     ("delete removes only idle named conversation state and session links", DeleteConversation),
     ("conversation workers run concurrently and commands stay scoped", ConcurrentConversations),
@@ -83,6 +86,227 @@ static async Task Throws<T>(Func<Task> action)
     }
 
     throw new Exception($"Expected {typeof(T).Name}");
+}
+
+static async Task WorkerEngines()
+{
+    using var fixture = new Fixture();
+    using (var git = Process.Start(new ProcessStartInfo("git") { ArgumentList = { "init", "--quiet", fixture.Root } })!)
+    {
+        await git.WaitForExitAsync();
+    }
+
+    var journal = new Journal(fixture.Options);
+    var sessions = new SessionStore(fixture.Options);
+    var runner = new CodexRunner(fixture.Options, sessions);
+    var updates = new System.Collections.Concurrent.ConcurrentQueue<object>();
+    var sent = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    int next = 0;
+
+    int Send(string text)
+    {
+        var id = ++next;
+        updates.Enqueue(new { update_id = id, message = new { from = new { id = 123 }, chat = new { id = 123, type = "private" }, text } });
+        return id;
+    }
+
+    using var http = new HttpClient(new Handler(async (request, token) =>
+    {
+        if (request.RequestUri!.AbsolutePath.EndsWith("getUpdates"))
+        {
+            await Task.Delay(20, token);
+            var batch = new List<object>();
+            while (updates.TryDequeue(out var item))
+            {
+                batch.Add(item);
+            }
+
+            return Response(200, JsonSerializer.Serialize(new { ok = true, result = batch }));
+        }
+
+        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        if (body.RootElement.TryGetProperty("text", out var text))
+        {
+            sent.Enqueue(WebUtility.HtmlDecode(text.GetString()!));
+        }
+
+        return Response(200, "{\"ok\":true,\"result\":{\"message_id\":42}}");
+    }));
+    using var worker = new BotWorker(new TelegramClient(http, fixture.Options), runner, sessions, journal, fixture.Options, NullLogger<BotWorker>.Instance);
+    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+    async Task Wait(Func<JournalData, bool> condition)
+    {
+        while (!condition(await journal.SnapshotAsync(deadline.Token)))
+        {
+            if (worker.ExecuteTask?.IsCompleted == true)
+            {
+                await worker.ExecuteTask;
+            }
+
+            await Task.Delay(20, deadline.Token);
+        }
+    }
+
+    await worker.StartAsync(default);
+    try
+    {
+        Send("/engine claude");
+        var first = Send("wait");
+        await Wait(d => File.Exists(Path.Combine(fixture.Root, "claude-started")));
+        var second = Send("hello");
+        Send("/engine codex");
+        var third = Send("hello");
+        Send("/approvals on");
+        await Wait(d => d.Jobs.Count == 3 && d.Jobs.Last().ApprovalRequired);
+        var state = await journal.SnapshotAsync(default);
+        Assert(state.Jobs.Single(j => j.Id == first).Engine == "claude");
+        Assert(state.Jobs.Single(j => j.Id == second).Engine == "claude" && !state.Jobs.Single(j => j.Id == second).ApprovalRequired);
+        Assert(state.Jobs.Single(j => j.Id == third).Engine == "codex");
+        Send("/remove " + third);
+        Send("/cancel");
+        await Wait(d => d.Outcomes.Any(o => o.Id == second && o.Status == "Completed"));
+        state = await journal.SnapshotAsync(default);
+        Assert(state.Outcomes.Any(o => o.Id == first && o.Status == "Cancelled or timed out"));
+        Assert(await sessions.GetAsync(default) is null);
+        Assert(await sessions.GetAsync(default, engine: "claude") == "claude-session");
+        Assert(state.Replies.Any(r => r.Text.Contains("Claude answer")) || sent.Any(r => r.Contains("Claude answer")));
+        Send("/engine claude");
+        Send("/new");
+        await Wait(d => d.Jobs.Count == 0 && d.Outcomes.Count == 3);
+        Assert(await sessions.GetAsync(default, engine: "claude") is null);
+    }
+    finally
+    {
+        await worker.StopAsync(default);
+    }
+}
+
+static async Task EngineSettings()
+{
+    using var fixture = new Fixture();
+    var journal = new Journal(fixture.Options);
+    var sessions = new SessionStore(fixture.Options);
+    var modelMenus = new ModelMenus();
+    var permissionMenus = new PermissionMenus();
+
+    await journal.InitializeAsync(default);
+    await sessions.SetAsync("codex-session", default);
+    await sessions.SetAsync("claude-session", default, engine: "claude");
+    await journal.ChangeAsync(d =>
+    {
+        BotCommands.Apply(d, 123, "/model codex-model", false);
+        permissionMenus.Apply(d, 123, "full", fixture.Options);
+        modelMenus.Show(d, 123, true, []);
+        var oldModel = d.Replies.Last().Buttons![0][0].Data[7..];
+        permissionMenus.Show(d, 123, fixture.Options);
+        var oldPermission = d.Replies.Last().Buttons![0][0].Data[5..];
+        d.Jobs.Add(new Job(1, 123, "original", Settings: ModelSettings.For(d, "default")));
+        BotCommands.Apply(d, 123, "/engine claude", false);
+        Assert(ModelSettings.For(d, "default").Model is null);
+        Assert(Engines.ClaudePermissionFor(d, "default") == "dontAsk");
+        Assert(modelMenus.Select(d, 123, oldModel).Contains("expired"));
+        Assert(permissionMenus.Select(d, 123, oldPermission, fixture.Options).Contains("expired"));
+        BotCommands.Apply(d, 123, "/model sonnet", false);
+        BotCommands.Apply(d, 123, "/effort high", false);
+        permissionMenus.Apply(d, 123, "full", fixture.Options);
+        BotCommands.Apply(d, 123, "/btw question", false);
+        Assert(d.Replies.Last().Text.Contains("Codex only"));
+        Assert(d.SideQuestions.Count == 0);
+        BotCommands.Apply(d, 123, "/approvals on", false);
+        Assert(!d.Jobs[0].ApprovalRequired);
+        d.Schedules.Add(new Schedule("s", 123, "scheduled", "default", "every 1h", DateTimeOffset.UtcNow.AddMinutes(-1)));
+        Scheduling.EnqueueDue(d, DateTimeOffset.UtcNow, true);
+        Assert(d.Jobs.Last().Engine == "claude" && !d.Jobs.Last().ApprovalRequired);
+        Assert(d.Jobs.Last().ClaudePermission == "bypassPermissions");
+        Assert(d.Jobs.Last().Settings == new ModelSettings("sonnet", "high"));
+        BotCommands.Apply(d, 123, "/engine codex", false);
+        Assert(ModelSettings.For(d, "default").Model == "codex-model");
+        Assert(d.Jobs[0].Engine == "codex" && d.Jobs.Last().Engine == "claude");
+        Assert(d.SandboxFor("default", "read-only") == "danger-full-access");
+        BotCommands.Apply(d, 123, "/engine claude", false);
+    }, default);
+
+    var recovered = new Journal(fixture.Options);
+    await recovered.InitializeAsync(default);
+    var state = await recovered.SnapshotAsync(default);
+    Assert(state.EngineFor("default") == "claude");
+    Assert(state.ClaudeModelSettings["default"] == new ModelSettings("sonnet", "high"));
+    Assert(state.Jobs[0].Engine == "codex" && state.Jobs.Last().Engine == "claude");
+    Assert(await sessions.GetAsync(default) == "codex-session");
+    Assert(await sessions.GetAsync(default, engine: "claude") == "claude-session");
+    await sessions.ClearAsync(default, engine: "claude");
+    Assert(await sessions.GetAsync(default) == "codex-session");
+    Assert(await sessions.GetAsync(default, engine: "claude") is null);
+    Assert(JsonSerializer.Deserialize<Job>("{\"Id\":9,\"ChatId\":123,\"Text\":\"legacy\"}")!.Engine == "codex");
+
+    await sessions.SetAsync("codex-other", default, "other");
+    await sessions.SetAsync("claude-other", default, "other", engine: "claude");
+    state.Conversations.Add("other");
+    state.ConversationEngines["other"] = "claude";
+    state.ClaudeModelSettings["other"] = new("opus");
+    state.ClaudePermissions["other"] = "plan";
+    await BotCommands.DeleteAsync(state, 123, "/delete other", sessions, default);
+    Assert(await sessions.GetAsync(default, "other") is null && await sessions.GetAsync(default, "other", engine: "claude") is null);
+    Assert(!state.ConversationEngines.ContainsKey("other") && !state.ClaudeModelSettings.ContainsKey("other") && !state.ClaudePermissions.ContainsKey("other"));
+}
+
+static async Task ClaudeExecution()
+{
+    using var fixture = new Fixture();
+    var sessions = new SessionStore(fixture.Options);
+    var runner = new CodexRunner(fixture.Options, sessions);
+    await sessions.SetAsync("codex-session", default);
+    var progress = new List<string>();
+
+    Assert(await runner.RunAsync("hello", default, e => progress.Add(e.GetRawText()), engine: "claude") == "Claude answer");
+    Assert(await sessions.GetAsync(default) == "codex-session");
+    Assert(await sessions.GetAsync(default, engine: "claude") == "claude-session");
+    Assert(!string.Join("", progress).Contains("not-progress"));
+    Assert(await runner.RunAsync("--dangerously-skip-permissions", default, settings: new("sonnet", "high"), engine: "claude", claudePermission: "acceptEdits") == "Claude answer");
+    using (var request = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(fixture.Root, "claude-request.json"))))
+    {
+        var args = request.RootElement.GetProperty("args").EnumerateArray().Select(a => a.GetString()).ToArray();
+        Assert(args.Contains("--resume") && args.Contains("sonnet") && args.Contains("high") && args.Contains("acceptEdits"));
+        Assert(!args.Contains("--dangerously-skip-permissions"));
+        Assert(request.RootElement.GetProperty("input").GetString() == "--dangerously-skip-permissions");
+    }
+
+    var image = Path.Combine(fixture.Root, "photo.png");
+    await File.WriteAllBytesAsync(image, [1, 2, 3]);
+    await runner.RunAsync("image", default, images: [image], engine: "claude");
+    using (var request = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(fixture.Root, "claude-request.json"))))
+    {
+        using var input = JsonDocument.Parse(request.RootElement.GetProperty("input").GetString()!);
+        Assert(input.RootElement.GetProperty("message").GetProperty("content")[1].GetProperty("source").GetProperty("data").GetString() == "AQID");
+    }
+
+    foreach (var (prompt, reason) in new[] { ("credit-error", "usage or rate limit"), ("missing-result", "without a final result"), ("bad-json", "invalid JSON"), ("stderr-error", "authentication rejected") })
+    {
+        try
+        {
+            await runner.RunAsync(prompt, default, engine: "claude");
+            throw new Exception("Expected Claude failure");
+        }
+        catch (CodexFailure ex)
+        {
+            Assert(ex.Reason.Contains(reason), ex.Reason);
+            Assert(!ex.UserMessage(1).Contains("private-diagnostic"));
+            Assert(await sessions.GetAsync(default, engine: "claude") == "claude-session");
+        }
+    }
+
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var waiting = runner.RunAsync("wait", timeout.Token, engine: "claude");
+    while (!File.Exists(Path.Combine(fixture.Root, "claude-started")))
+    {
+        await Task.Delay(10, timeout.Token);
+    }
+
+    Assert(runner.Cancel());
+    await Throws<OperationCanceledException>(async () => await waiting);
+    Assert(!runner.IsRunning);
+    Assert(await runner.RunAsync("after cancel", default, engine: "claude") == "Claude answer");
 }
 
 static async Task ConcurrentConversations()
@@ -189,7 +413,7 @@ static async Task ConcurrentConversations()
         Assert(!Started("a-second") && !Started("b-second"), "Same-conversation jobs overlapped");
         await Throws<InvalidOperationException>(() => runner.RunAsync("duplicate", default));
         Send("/status");
-        await Wait(d => Said(d, $"Running: {b} (other)") && Said(d, "Waiting: 1"));
+        await Wait(d => Said(d, $"Running: {b} (other, codex)") && Said(d, "Waiting: 1"));
         Send("/timings " + a);
         await Wait(d => Said(d, "No timing report yet"));
         Send("/btw question-b");
@@ -1955,6 +2179,12 @@ sealed class Fixture : IDisposable
             File.SetUnixFileMode(fake, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
+        var claude = Path.Combine(AppContext.BaseDirectory, "fake-claude.py");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(claude, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
         var values = new Dictionary<string, string?>
         {
             ["BLOODRAVEN_TELEGRAM_BOT_TOKEN"] = "test-secret",
@@ -1963,6 +2193,7 @@ sealed class Fixture : IDisposable
             ["BLOODRAVEN_WORKING_DIRECTORY"] = Root,
             ["BLOODRAVEN_STATE_DIRECTORY"] = Path.Combine(Root, "state"),
             ["BLOODRAVEN_CODEX_EXECUTABLE"] = fake,
+            ["BLOODRAVEN_CLAUDE_EXECUTABLE"] = claude,
             ["BLOODRAVEN_CODEX_SANDBOX"] = "workspace-write",
             ["BLOODRAVEN_TASK_TIMEOUT_SECONDS"] = "30",
             ["TEST_CODEX_MODE"] = "normal",

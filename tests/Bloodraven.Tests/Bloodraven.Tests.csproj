@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Bloodraven/Bloodraven.csproj" />
+    <None Update="fake-claude.py" CopyToOutputDirectory="PreserveNewest" />
     <None Update="fake-codex.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

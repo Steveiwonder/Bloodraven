@@ -10,6 +10,7 @@ public sealed class AppOptions
     public string WorkingDirectory { get; } = Path.GetFullPath(Required("BLOODRAVEN_WORKING_DIRECTORY"));
     public string StateDirectory { get; } = Path.GetFullPath(Environment.GetEnvironmentVariable("BLOODRAVEN_STATE_DIRECTORY") ?? "./state");
     public string CodexExecutable { get; } = Environment.GetEnvironmentVariable("BLOODRAVEN_CODEX_EXECUTABLE") ?? "codex";
+    public string ClaudeExecutable { get; } = Environment.GetEnvironmentVariable("BLOODRAVEN_CLAUDE_EXECUTABLE") ?? "claude";
     public string Sandbox { get; } = ValidateSandbox(Environment.GetEnvironmentVariable("BLOODRAVEN_CODEX_SANDBOX") ?? "workspace-write");
     public int TaskTimeoutSeconds { get; } = Timeout();
     public int ProgressIntervalSeconds { get; } = ProgressInterval();
@@ -67,9 +68,17 @@ public sealed class AppOptions
 
 public static class Preflight
 {
-    public static async Task CheckAsync(AppOptions options, CancellationToken token)
+    public static async Task CheckAsync(AppOptions options, CancellationToken token, string engine = "codex")
     {
         await CheckCommandAsync(options, "git", ["rev-parse", "--show-toplevel"], token);
+        Engines.Validate(engine);
+        if (engine == "claude")
+        {
+            await CheckCommandAsync(options, options.ClaudeExecutable, ["--version"], token);
+            await CheckCommandAsync(options, options.ClaudeExecutable, ["auth", "status"], token);
+            return;
+        }
+
         await CheckCommandAsync(options, options.CodexExecutable, ["--version"], token);
         await CheckCommandAsync(options, options.CodexExecutable, ["login", "status"], token);
     }

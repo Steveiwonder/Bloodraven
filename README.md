@@ -2,7 +2,7 @@
 
 Task diagnostics are available with `sudo journalctl -u bloodraven --since "15 minutes ago" --no-pager -n 100`. Version 0.3.5 logs task IDs, submitted settings, elapsed time, failure stages, new/resumed execution and available exit codes. Known CLI errors are classified into actionable reasons; unknown errors remain explicitly unclassified. Raw stderr, prompts, answers and credentials are not logged. A failed task keeps its saved conversation; use a separate `/conversation diagnostic` for testing instead of resetting your existing history.
 
-Bloodraven is a small, self-hosted Telegram interface for the OpenAI Codex CLI. It runs on your own Ubuntu machine, uses your existing Codex login, and requires no inbound ports or public web server.
+Bloodraven is a small, self-hosted Telegram interface for the OpenAI Codex and Claude Code CLIs. It runs on your own Ubuntu machine, uses your existing Codex login, and requires no inbound ports or public web server.
 
 > [!WARNING]
 > Anyone who controls your authorised Telegram account can instruct Codex with the permissions you configure. Read [SECURITY.md](SECURITY.md) before installation.
@@ -124,22 +124,23 @@ bash bloodraven-install.sh
 
 | Command | Action |
 |---|---|
+| `/engine codex` / `/engine claude` | Select engine for new tasks; separate history and preferences |
 | `/conversation homelab` | Create or switch to a named conversation |
 | `/conversations` | List conversations with switch buttons |
 | `/delete name` | Delete a named idle conversation, its pending work, schedules, settings and saved session links; retain Codex transcripts and repository files. The default conversation cannot be deleted. |
 | `/new` | Reset the selected conversation when this command reaches the queue |
 | `/status` | Show the active conversation, session, running task and queue depth |
-| `/health` | Show Bloodraven version, repository, live Codex/login check, polling, schedules and recent failures |
+| `/health` | Show Bloodraven version, repository, live selected CLI/login check, polling, schedules and recent failures |
 | `/queue` | Show tasks with **Move to next** and **Remove** buttons |
 | `/front ID` / `/remove ID` | Move a pending task to next, or remove it |
 | `/clear` | Remove pending tasks; keep the running task and schedules |
-| `/cancel` | Cancel the running Codex task, including an approval wait |
+| `/cancel` | Cancel the running task, including an approval wait |
 | `/schedule` | Show scheduling examples and controls |
 | `/approvals on` / `/approvals off` | Enable or disable native approval mode for new tasks |
 | `/file reports/summary.md` | Send a file from the configured repository as a Telegram document |
 | `/help` | Show available commands |
 
-Ordinary text goes to Codex as prompt data, never as CLI arguments. Unknown slash commands are rejected with help; native interactive Codex slash commands are not implemented.
+Ordinary text goes to the selected CLI as prompt data, never as CLI arguments. Unknown slash commands are rejected with help; native interactive Codex slash commands are not implemented.
 
 ### Concurrent conversations (0.4.0)
 
@@ -237,6 +238,72 @@ Command names and output excerpts are shown as code, with length limits and reda
 - `/cancel` stops the selected conversation’s current task, leaving its queued tasks and other conversations running. Tasks time out after one hour by default. Codex JSON lines are limited to 1 MiB and final replies to 100,000 characters; oversized output fails safely.
 - Do not delete a corrupt journal just to restart: back it up and investigate. Local state contains prompts and replies, so treat backups as sensitive. Durability protects normal process crashes/restarts; it is not a substitute for disk/filesystem backups or a guarantee against power-loss/storage failures.
 
+## Switching between Codex and Claude (0.5.0)
+
+Use `/engine claude` or `/engine codex` in the selected conversation. `/engine`
+shows the current choice. Switching never transfers history or automatically
+retries a failed task. Send your next instruction to start or resume the chosen
+engine's own session.
+
+Each conversation keeps separate session links, model/effort settings and
+permission settings for the two engines. Existing installations and old queued
+jobs default to Codex. Running and queued jobs retain their submitted engine and
+settings. Future schedule occurrences use the engine selected when they become
+due. `/status` shows the selected engine and the running job's engine.
+
+`/new` resets only the submitted engine's session when that queued command runs.
+`/delete name` removes both engines' links and preferences for an idle conversation.
+`/cancel`, `/queue`, `/clear`, schedules and file delivery remain conversation-scoped.
+Both CLIs still use the same configured working directory and operating-system
+user: this is conversation isolation, not separate filesystems or credentials.
+Their own repository instructions, integrations and configuration apply normally.
+
+### Claude setup
+
+Install [Claude Code](https://code.claude.com/docs/en/setup) and authenticate it as
+Bloodraven's service user, using your Claude account or your own configured API
+credentials. The installer continues to set up Codex; Claude is optional and is
+not installed or authenticated automatically. Codex startup checks still apply.
+Running out of model credits does not require removing the Codex login.
+
+If `claude` is not on the service's PATH, add its absolute path to
+`/etc/bloodraven/bloodraven.env`, for example:
+
+```text
+BLOODRAVEN_CLAUDE_EXECUTABLE="/home/YOUR_USER/.local/bin/claude"
+```
+
+Wait for active work to finish before restarting Bloodraven to load environment
+changes. `/health` checks the selected engine's executable and authentication.
+An unavailable Claude executable/login fails only the submitted Claude task;
+there is no automatic fallback to another engine or account.
+
+Claude uses its documented [print-mode CLI](https://code.claude.com/docs/en/headless)
+with streaming JSON. Use `/model sonnet`, `/model opus`, `/model haiku`, a model ID,
+or `/model default`. `/effort low|medium|high|xhigh|max|default` and presets are
+supported when your installed CLI/model supports them. `/model` shows manual
+choices; it does not claim to discover the account's available Claude models.
+
+Claude permissions default to `dontAsk`, independently of Codex preferences:
+
+| Command | Claude mode |
+|---|---|
+| `/permissions default` or `/permissions dontAsk` | Deny tools that require approval |
+| `/permissions acceptEdits` | Automatically approve file edits |
+| `/permissions plan` | Planning mode |
+| `/permissions full` | `bypassPermissions` |
+
+These are Claude permission modes, not Codex OS sandboxes. Changing them affects
+new submissions only. Claude settings and host restrictions still apply. Codex's
+`read-only`, `workspace-write` and Telegram approval modes are not silently mapped.
+
+In this version, `/btw` and `/approvals` are Codex-only and return an explicit
+unsupported message with Claude selected. Claude progress reports elapsed time
+and tool activity, without forwarding reasoning or raw tool payloads. Text and
+image attachments are supported; Claude images must be at most 5 MB each. Final
+answers and failures use the same durable Telegram reply queue as Codex. A
+credit/rate-limit failure preserves the session and does not replay the task.
+
 ## Configuration
 
 | Variable | Required | Default | Purpose |
@@ -244,9 +311,10 @@ Command names and output excerpts are shown as code, with length limits and reda
 | `BLOODRAVEN_TELEGRAM_BOT_TOKEN` | yes | — | Token issued by BotFather |
 | `BLOODRAVEN_ALLOWED_USER_ID` | yes | — | Only accepted Telegram sender |
 | `BLOODRAVEN_ALLOWED_CHAT_ID` | no | — | Additionally restricts the private chat |
-| `BLOODRAVEN_WORKING_DIRECTORY` | yes | — | Git repository in which Codex runs |
+| `BLOODRAVEN_WORKING_DIRECTORY` | yes | — | Git repository in which the selected CLI runs |
 | `BLOODRAVEN_STATE_DIRECTORY` | no | `./state` | Persistent session storage |
 | `BLOODRAVEN_CODEX_EXECUTABLE` | no | `codex` | Absolute path or executable name |
+| `BLOODRAVEN_CLAUDE_EXECUTABLE` | no | `claude` | Optional Claude CLI absolute path or executable name |
 | `BLOODRAVEN_CODEX_SANDBOX` | no | `workspace-write` | `read-only`, `workspace-write`, or `danger-full-access` |
 | `BLOODRAVEN_TASK_TIMEOUT_SECONDS` | no | `3600` | Task time limit, 30–86400 seconds |
 | `BLOODRAVEN_PROGRESS_INTERVAL_SECONDS` | no | `30` | Progress interval, 10–3600 seconds; `0` disables updates |
@@ -301,7 +369,7 @@ This follows [Ubuntu’s documented per-application user-namespace approach](htt
 
 ## Scope
 
-Bloodraven 0.4 supports Ubuntu, one authorised bot owner, named conversations with independent concurrent queues, photos/documents, recurring schedules, per-conversation model/reasoning controls and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
+Bloodraven 0.5 supports Ubuntu, one authorised bot owner, named conversations with independent concurrent queues, photos/documents, recurring schedules, per-conversation model/reasoning controls and optional native approval buttons. Multiple owners, multiple repositories, Docker packaging and other chat platforms are outside this release. `/health` performs repository/Codex/login checks with a five-second timeout and reports recent task outcomes; it does not claim every external service is healthy.
 
 ## Development
 
